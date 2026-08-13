@@ -26,3 +26,9 @@
 - [x] Verify navigation responsiveness and administrator access without a human-verification dependency.
 - [x] Restore separate member sign-in and membership-selection entry points while retaining the dedicated local administrator access route.
 - [x] Verify public, member, and administrator navigation and access flows after separating the authentication experiences, including public CTAs, local administrator login, administrator navigation, and the authenticated workspace transition.
+- [x] Redirect authenticated members from the landing page to the correct member workspace after sign-in.
+- [x] Restore functional package selection for signed-in members, including a selected-package handoff to the membership payment workflow.
+- [x] Verify the complete member sign-in, redirect, package selection, and payment-instruction path.
+- [x] Send already authenticated users directly from public package selection to the selected membership payment workflow.
+- [x] Verify and document signed-out and authenticated member package-selection behavior after the direct-routing update.
+- [x] Verify signed-out package selection after the direct-routing update and record both signed-out and authenticated route outcomes.
