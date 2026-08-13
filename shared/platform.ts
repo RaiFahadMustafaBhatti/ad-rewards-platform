@@ -26,7 +26,7 @@ export const INITIAL_PACKAGES = [
 ] as const;
 
 export const INITIAL_PLATFORM_SETTINGS: Record<string, string> = {
-  company_name: "[YOUR COMPANY NAME]",
+  company_name: "FMB Earning Hub",
   contact_email: "[YOUR SUPPORT EMAIL]",
   contact_phone: "[YOUR SUPPORT PHONE]",
   whatsapp_number: "[YOUR WHATSAPP NUMBER]",

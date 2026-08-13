@@ -19,7 +19,6 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { startLogin } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import { BadgeDollarSign, Bell, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
@@ -62,6 +61,9 @@ export default function DashboardLayout({
     return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
   });
   const { loading, user } = useAuth();
+  const [location, setLocation] = useLocation();
+  const accessPath = location.startsWith("/admin") ? "/admin-access" : "/member-access";
+  const accessLabel = location.startsWith("/admin") ? "Administrator access" : "Member sign in";
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, sidebarWidth.toString());
@@ -80,15 +82,15 @@ export default function DashboardLayout({
               Sign in to continue
             </h1>
             <p className="text-sm text-muted-foreground text-center max-w-sm">
-              Access to this dashboard requires authentication. Continue to launch the login flow.
+              Access to this dashboard requires authentication. Continue to the relevant sign-in screen.
             </p>
           </div>
           <Button
-            onClick={() => startLogin()}
+            onClick={() => setLocation(accessPath)}
             size="lg"
             className="w-full shadow-lg hover:shadow-xl transition-all"
           >
-            Sign in
+            {accessLabel}
           </Button>
         </div>
       </div>
@@ -185,7 +187,7 @@ function DashboardLayoutContent({
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
                     <span className="font-semibold tracking-tight truncate">
-                    Advera
+                    FMB Earning Hub
                   </span>
                 </div>
               ) : null}

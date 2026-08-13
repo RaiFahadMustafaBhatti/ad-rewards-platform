@@ -1,20 +1,46 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAuth } from "@/_core/hooks/useAuth";
-import DashboardLayout from "@/components/DashboardLayout";
-import { AdminCampaigns, AdminDashboard, AdminPackages, AdminPayments, AdminRisk, AdminUsers, AdminWithdrawals } from "@/pages/AdminPages";
-import { MemberEarnings, MemberNotifications } from "@/pages/MemberActivity";
-import { MemberAds, MemberMembership, MemberOverview, MemberProfile, MemberWithdrawals } from "@/pages/MemberPages";
-import { ContactPage, HowItWorksPage, PackagesPage, PolicyPage } from "@/pages/PublicPages";
-import NotFound from "@/pages/NotFound";
 import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import Home from "./pages/Home";
+import { lazy, Suspense } from "react";
+
+const Home = lazy(() => import("./pages/Home"));
+const DashboardLayout = lazy(() => import("@/components/DashboardLayout"));
+const AdminAccess = lazy(() => import("@/pages/AdminAccess"));
+const MemberAccess = lazy(() => import("@/pages/MemberAccess"));
+const NotFound = lazy(() => import("@/pages/NotFound"));
+const publicPages = () => import("@/pages/PublicPages");
+const memberPages = () => import("@/pages/MemberPages");
+const adminPages = () => import("@/pages/AdminPages");
+const memberActivity = () => import("@/pages/MemberActivity");
+const ContactPage = lazy(async () => ({ default: (await publicPages()).ContactPage }));
+const HowItWorksPage = lazy(async () => ({ default: (await publicPages()).HowItWorksPage }));
+const PackagesPage = lazy(async () => ({ default: (await publicPages()).PackagesPage }));
+const PolicyPage = lazy(async () => ({ default: (await publicPages()).PolicyPage }));
+const MemberOverview = lazy(async () => ({ default: (await memberPages()).MemberOverview }));
+const MemberAds = lazy(async () => ({ default: (await memberPages()).MemberAds }));
+const MemberMembership = lazy(async () => ({ default: (await memberPages()).MemberMembership }));
+const MemberWithdrawals = lazy(async () => ({ default: (await memberPages()).MemberWithdrawals }));
+const MemberProfile = lazy(async () => ({ default: (await memberPages()).MemberProfile }));
+const MemberEarnings = lazy(async () => ({ default: (await memberActivity()).MemberEarnings }));
+const MemberNotifications = lazy(async () => ({ default: (await memberActivity()).MemberNotifications }));
+const AdminDashboard = lazy(async () => ({ default: (await adminPages()).AdminDashboard }));
+const AdminPayments = lazy(async () => ({ default: (await adminPages()).AdminPayments }));
+const AdminWithdrawals = lazy(async () => ({ default: (await adminPages()).AdminWithdrawals }));
+const AdminCampaigns = lazy(async () => ({ default: (await adminPages()).AdminCampaigns }));
+const AdminPackages = lazy(async () => ({ default: (await adminPages()).AdminPackages }));
+const AdminRisk = lazy(async () => ({ default: (await adminPages()).AdminRisk }));
+const AdminUsers = lazy(async () => ({ default: (await adminPages()).AdminUsers }));
+
+function RouteLoading() {
+  return <div className="grid min-h-[40vh] place-items-center bg-[#f7f8fc] text-sm font-bold text-slate-500">Loading workspace…</div>;
+}
 
 function Router() {
   return (
-    <Switch>
+    <Suspense fallback={<RouteLoading />}><Switch>
       <Route path={"/"} component={Home} />
       <Route path={"/how-it-works"} component={HowItWorksPage} />
       <Route path={"/packages"} component={PackagesPage} />
@@ -24,6 +50,8 @@ function Router() {
       <Route path={"/refunds"}>{() => <PolicyPage kind="refunds" />}</Route>
       <Route path={"/disclosures"}>{() => <PolicyPage kind="disclosure" />}</Route>
       <Route path={"/contact"} component={ContactPage} />
+      <Route path={"/member-access"} component={MemberAccess} />
+      <Route path={"/admin-access"} component={AdminAccess} />
       <Route path={"/dashboard"}>{() => <MemberRoute><MemberOverview /></MemberRoute>}</Route>
       <Route path={"/dashboard/ads"}>{() => <MemberRoute><MemberAds /></MemberRoute>}</Route>
       <Route path={"/dashboard/earnings"}>{() => <MemberRoute><MemberEarnings /></MemberRoute>}</Route>
@@ -40,7 +68,7 @@ function Router() {
       <Route path={"/admin/users"}>{() => <AdminRoute><AdminUsers /></AdminRoute>}</Route>
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
-    </Switch>
+    </Switch></Suspense>
   );
 }
 

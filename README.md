@@ -1,8 +1,8 @@
-# Advera — Advertising Rewards Platform
+# FMB Earning Hub — Advertising Rewards Platform
 
 ## Purpose
 
-Advera is a full-stack advertising rewards and digital membership application. It is designed as a **verified advertising participation service**, not as an investment product. The public interface and member flows explicitly avoid profit, return, passive-income, or guaranteed-earning claims.
+FMB Earning Hub is a full-stack advertising rewards and digital membership application. It is designed as a **verified advertising participation service**, not as an investment product. The public interface and member flows explicitly avoid profit, return, passive-income, or guaranteed-earning claims.
 
 ## Implemented Scope
 

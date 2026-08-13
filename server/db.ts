@@ -42,6 +42,10 @@ function requireDatabase<T>(db: T | null): T {
   return db;
 }
 
+export function isDesignatedAdminEmail(email?: string | null) {
+  return Boolean(email?.trim() && process.env.ADMIN_EMAIL?.trim() && email.trim().toLowerCase() === process.env.ADMIN_EMAIL.trim().toLowerCase());
+}
+
 export async function upsertUser(user: InsertUser): Promise<void> {
   if (!user.openId) throw new Error("User openId is required for upsert");
   const db = await getDb();
@@ -60,7 +64,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   if (user.role !== undefined) {
     values.role = user.role;
     updateSet.role = user.role;
-  } else if (user.openId === ENV.ownerOpenId) {
+  } else if (user.openId === ENV.ownerOpenId || isDesignatedAdminEmail(user.email)) {
     values.role = "admin";
     updateSet.role = "admin";
   }
@@ -72,6 +76,13 @@ export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  return result[0];
+}
+
+export async function getUserByEmail(email: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(users).where(eq(users.email, email.trim().toLowerCase())).limit(1);
   return result[0];
 }
 

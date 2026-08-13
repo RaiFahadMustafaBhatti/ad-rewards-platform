@@ -1,5 +1,7 @@
 import { COOKIE_NAME } from "@shared/const";
+import { timingSafeEqual } from "node:crypto";
 import { getSessionCookieOptions } from "./_core/cookies";
+import { sdk } from "./_core/sdk";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
@@ -17,6 +19,8 @@ import {
   getAdminWithdrawals,
   getDashboardOverview,
   getEligibleCampaigns,
+  getUserByEmail,
+  getUserByOpenId,
   getLedgerHistory,
   getMemberProfile,
   getPublicPackages,
@@ -29,6 +33,7 @@ import {
   reviewPaymentProof,
   startAdSession,
   submitPaymentProof,
+  upsertUser,
   updateWithdrawalStatus,
   updatePlatformSetting,
   updatePackageRules,
@@ -47,10 +52,67 @@ function toDomainError(error: unknown): never {
   throw new Error(error instanceof Error ? error.message : "The request could not be completed.");
 }
 
+const localAdminAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOCAL_ADMIN_WINDOW_MS = 15 * 60 * 1_000;
+const LOCAL_ADMIN_MAX_ATTEMPTS = 5;
+
+function requestKey(headers: Record<string, string | string[] | undefined>) {
+  const forwarded = headers["x-forwarded-for"];
+  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return value?.split(",")[0]?.trim() || "local";
+}
+
+function checkLocalAdminRateLimit(key: string) {
+  const now = Date.now();
+  const current = localAdminAttempts.get(key);
+  if (!current || current.resetAt <= now) return;
+  if (current.count >= LOCAL_ADMIN_MAX_ATTEMPTS) throw new Error("Too many sign-in attempts. Please wait before trying again.");
+}
+
+function recordLocalAdminFailure(key: string) {
+  const now = Date.now();
+  const current = localAdminAttempts.get(key);
+  if (!current || current.resetAt <= now) localAdminAttempts.set(key, { count: 1, resetAt: now + LOCAL_ADMIN_WINDOW_MS });
+  else localAdminAttempts.set(key, { ...current, count: current.count + 1 });
+}
+
+function secureValueMatch(value: string, expected: string) {
+  const received = Buffer.from(value);
+  const target = Buffer.from(expected);
+  return received.length === target.length && timingSafeEqual(received, target);
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
+    localAdminLogin: publicProcedure.input(z.object({ email: z.string().trim().email(), password: z.string().min(1).max(256) })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkLocalAdminRateLimit(key);
+      const configuredEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() ?? "";
+      const configuredPassword = process.env.ADMIN_PASSWORD ?? "";
+      const email = input.email.trim().toLowerCase();
+      if (!configuredEmail || !configuredPassword || !secureValueMatch(email, configuredEmail) || !secureValueMatch(input.password, configuredPassword)) {
+        recordLocalAdminFailure(key);
+        throw new Error("Invalid administrator credentials.");
+      }
+      localAdminAttempts.delete(key);
+      let admin = await getUserByEmail(configuredEmail);
+      if (!admin) {
+        const openId = `local-admin:${configuredEmail}`;
+        await upsertUser({ openId, email: configuredEmail, name: "FMB Earning Hub Administrator", loginMethod: "local_admin", role: "admin", accountStatus: "active", lastSignedIn: new Date() });
+        admin = await getUserByOpenId(openId);
+      }
+      if (!admin) throw new Error("The administrator account could not be prepared.");
+      if (admin.role !== "admin" || admin.accountStatus !== "active") {
+        await upsertUser({ openId: admin.openId, role: "admin", accountStatus: "active", lastSignedIn: new Date() });
+        admin = await getUserByOpenId(admin.openId);
+      }
+      if (!admin) throw new Error("The administrator account could not be activated.");
+      const session = await sdk.createSessionToken(admin.openId, { name: admin.name ?? "FMB Earning Hub Administrator", expiresInMs: 8 * 60 * 60 * 1_000 });
+      ctx.res.cookie(COOKIE_NAME, session, { ...getSessionCookieOptions(ctx.req), maxAge: 8 * 60 * 60 * 1_000 });
+      return { success: true } as const;
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });

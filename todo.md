@@ -18,3 +18,11 @@
 - [x] Add responsive mobile navigation, loading states, empty states, confirmation dialogs, focus states, and accessible feedback.
 - [x] Add Vitest coverage for core financial validation and role/authorization rules.
 - [x] Run type checks, unit tests, database verification, and desktop/mobile visual checks; document the implemented scope and remaining integration requirements.
+- [x] Rename all public and authenticated product branding from Advera to FMB Earning Hub.
+- [x] Configure pimplesboy2@gmail.com as the designated administrator identity through the supported authenticated-user role mechanism, without storing a plaintext password in the application.
+- [x] Validate the rebranded application and administrator access configuration before delivery.
+- [x] Diagnose and reduce slow initial loading and route-to-route navigation delays.
+- [x] Replace the externally blocked administrator sign-in dependency with a supported non-blocking access path for the designated administrator.
+- [x] Verify navigation responsiveness and administrator access without a human-verification dependency.
+- [x] Restore separate member sign-in and membership-selection entry points while retaining the dedicated local administrator access route.
+- [x] Verify public, member, and administrator navigation and access flows after separating the authentication experiences, including public CTAs, local administrator login, administrator navigation, and the authenticated workspace transition.
