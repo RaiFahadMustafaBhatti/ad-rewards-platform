@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateWithdrawalQuote,
   evaluateAdCompletion,
+  evaluateVideoCompletion,
   isValidPakistanMobile,
   maskAccountNumber,
   validatePaymentScreenshot,
@@ -46,5 +47,13 @@ describe("platform financial and fraud rules", () => {
     expect(() => validatePaymentScreenshot({ name: "proof.pdf", type: "application/pdf", bytes: 200 })).toThrow();
     expect(() => validatePaymentScreenshot({ name: "proof.png", type: "image/png", bytes: 6 * 1024 * 1024 })).toThrow();
     expect(() => validatePaymentScreenshot({ name: "proof.webp", type: "image/webp", bytes: 1_024 })).not.toThrow();
+  });
+
+  it("requires package eligibility, elapsed playback, and unique completion for a video reward", () => {
+    const input = { startedAtMs: 1_000, nowMs: 30_000, requiredSeconds: 30, maxProgressSeconds: 30, priorCompletion: false, belongsToActivePackage: true };
+    expect(evaluateVideoCompletion(input)).toEqual({ eligible: true, reason: null });
+    expect(evaluateVideoCompletion({ ...input, maxProgressSeconds: 12 }).eligible).toBe(false);
+    expect(evaluateVideoCompletion({ ...input, priorCompletion: true }).reason).toContain("already claimed");
+    expect(evaluateVideoCompletion({ ...input, belongsToActivePackage: false }).eligible).toBe(false);
   });
 });

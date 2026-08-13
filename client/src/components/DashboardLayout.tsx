@@ -20,7 +20,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
-import { BadgeDollarSign, Bell, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, WalletCards } from "lucide-react";
+import { BadgeDollarSign, Bell, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, Video, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -29,6 +29,7 @@ import { Button } from "./ui/button";
 const memberMenuItems = [
   { icon: LayoutDashboard, label: "Overview", path: "/dashboard" },
   { icon: Megaphone, label: "Available ads", path: "/dashboard/ads" },
+  { icon: Video, label: "Package videos", path: "/dashboard/videos" },
   { icon: ReceiptText, label: "Earnings history", path: "/dashboard/earnings" },
   { icon: CreditCard, label: "Membership & payment", path: "/dashboard/membership" },
   { icon: WalletCards, label: "Withdrawals", path: "/dashboard/withdrawals" },
@@ -41,6 +42,7 @@ const adminMenuItems = [
   { icon: ReceiptText, label: "Payment review", path: "/admin/payments" },
   { icon: WalletCards, label: "Withdrawal review", path: "/admin/withdrawals" },
   { icon: Megaphone, label: "Campaigns", path: "/admin/campaigns" },
+  { icon: Video, label: "Video library", path: "/admin/videos" },
   { icon: BadgeDollarSign, label: "Package rules", path: "/admin/packages" },
   { icon: ShieldAlert, label: "Risk controls", path: "/admin/risk" },
   { icon: Users, label: "Member records", path: "/admin/users" },

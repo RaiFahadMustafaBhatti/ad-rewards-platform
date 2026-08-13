@@ -84,3 +84,18 @@ export function evaluateAdCompletion(input: {
   }
   return { eligible: true, reason: null } as const;
 }
+
+export function evaluateVideoCompletion(input: {
+  startedAtMs: number;
+  nowMs: number;
+  requiredSeconds: number;
+  maxProgressSeconds: number;
+  priorCompletion: boolean;
+  belongsToActivePackage: boolean;
+}) {
+  if (input.priorCompletion) return { eligible: false, reason: "Reward already claimed for this video." } as const;
+  if (!input.belongsToActivePackage) return { eligible: false, reason: "This video is not available for your membership." } as const;
+  if (input.maxProgressSeconds < input.requiredSeconds - 2) return { eligible: false, reason: "The video has not reached a validated completion point." } as const;
+  if (input.nowMs - input.startedAtMs < (input.requiredSeconds - 2) * 1000) return { eligible: false, reason: "The required playback duration has not elapsed." } as const;
+  return { eligible: true, reason: null } as const;
+}

@@ -26,6 +26,9 @@ const MemberWithdrawals = lazy(async () => ({ default: (await memberPages()).Mem
 const MemberProfile = lazy(async () => ({ default: (await memberPages()).MemberProfile }));
 const MemberEarnings = lazy(async () => ({ default: (await memberActivity()).MemberEarnings }));
 const MemberNotifications = lazy(async () => ({ default: (await memberActivity()).MemberNotifications }));
+const videoPages = () => import("@/pages/VideoPages");
+const MemberVideos = lazy(async () => ({ default: (await videoPages()).MemberVideos }));
+const AdminVideos = lazy(async () => ({ default: (await videoPages()).AdminVideos }));
 const AdminDashboard = lazy(async () => ({ default: (await adminPages()).AdminDashboard }));
 const AdminPayments = lazy(async () => ({ default: (await adminPages()).AdminPayments }));
 const AdminWithdrawals = lazy(async () => ({ default: (await adminPages()).AdminWithdrawals }));
@@ -54,6 +57,7 @@ function Router() {
       <Route path={"/admin-access"} component={AdminAccess} />
       <Route path={"/dashboard"}>{() => <MemberRoute><MemberOverview /></MemberRoute>}</Route>
       <Route path={"/dashboard/ads"}>{() => <MemberRoute><MemberAds /></MemberRoute>}</Route>
+      <Route path={"/dashboard/videos"}>{() => <MemberRoute><MemberVideos /></MemberRoute>}</Route>
       <Route path={"/dashboard/earnings"}>{() => <MemberRoute><MemberEarnings /></MemberRoute>}</Route>
       <Route path={"/dashboard/membership"}>{() => <MemberRoute><MemberMembership /></MemberRoute>}</Route>
       <Route path={"/dashboard/withdrawals"}>{() => <MemberRoute><MemberWithdrawals /></MemberRoute>}</Route>
@@ -63,6 +67,7 @@ function Router() {
       <Route path={"/admin/payments"}>{() => <AdminRoute><AdminPayments /></AdminRoute>}</Route>
       <Route path={"/admin/withdrawals"}>{() => <AdminRoute><AdminWithdrawals /></AdminRoute>}</Route>
       <Route path={"/admin/campaigns"}>{() => <AdminRoute><AdminCampaigns /></AdminRoute>}</Route>
+      <Route path={"/admin/videos"}>{() => <AdminRoute><AdminVideos /></AdminRoute>}</Route>
       <Route path={"/admin/packages"}>{() => <AdminRoute><AdminPackages /></AdminRoute>}</Route>
       <Route path={"/admin/risk"}>{() => <AdminRoute><AdminRisk /></AdminRoute>}</Route>
       <Route path={"/admin/users"}>{() => <AdminRoute><AdminUsers /></AdminRoute>}</Route>

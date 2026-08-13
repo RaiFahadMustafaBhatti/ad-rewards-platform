@@ -162,6 +162,10 @@ export const paymentProofs = mysqlTable(
     transactionId: varchar("transactionId", { length: 128 }).notNull(),
     screenshotKey: varchar("screenshotKey", { length: 512 }),
     screenshotUrl: varchar("screenshotUrl", { length: 512 }),
+    screenshotFileName: varchar("screenshotFileName", { length: 160 }),
+    screenshotMimeType: varchar("screenshotMimeType", { length: 80 }),
+    screenshotBytes: int("screenshotBytes"),
+    attemptNumber: int("attemptNumber").default(1).notNull(),
     additionalNote: text("additionalNote"),
     status: mysqlEnum("status", ["pending", "approved", "rejected"]).default("pending").notNull(),
     rejectionReason: text("rejectionReason"),
@@ -171,8 +175,76 @@ export const paymentProofs = mysqlTable(
   },
   table => [
     uniqueIndex("payment_proofs_transaction_unique").on(table.transactionId),
+    uniqueIndex("payment_proofs_user_attempt_unique").on(table.userId, table.attemptNumber),
     index("payment_proofs_user_status_idx").on(table.userId, table.status),
     index("payment_proofs_status_created_idx").on(table.status, table.createdAt),
+  ],
+);
+
+export const rewardVideos = mysqlTable(
+  "rewardVideos",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    packageId: int("packageId").notNull().references(() => packages.id, { onDelete: "restrict" }),
+    title: varchar("title", { length: 180 }).notNull(),
+    youtubeUrl: varchar("youtubeUrl", { length: 512 }).notNull(),
+    youtubeVideoId: varchar("youtubeVideoId", { length: 32 }).notNull(),
+    thumbnailUrl: varchar("thumbnailUrl", { length: 512 }),
+    description: text("description"),
+    rewardPaisa: int("rewardPaisa").notNull(),
+    requiredDurationSeconds: int("requiredDurationSeconds").default(30).notNull(),
+    sortOrder: int("sortOrder").default(0).notNull(),
+    status: mysqlEnum("status", ["enabled", "disabled"]).default("enabled").notNull(),
+    createdByUserId: int("createdByUserId").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: int("updatedByUserId").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  table => [
+    index("reward_videos_package_status_order_idx").on(table.packageId, table.status, table.sortOrder),
+    uniqueIndex("reward_videos_package_youtube_unique").on(table.packageId, table.youtubeVideoId),
+  ],
+);
+
+export const videoWatchSessions = mysqlTable(
+  "videoWatchSessions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    sessionToken: varchar("sessionToken", { length: 96 }).notNull(),
+    userId: int("userId").notNull().references(() => users.id, { onDelete: "restrict" }),
+    videoId: int("videoId").notNull().references(() => rewardVideos.id, { onDelete: "restrict" }),
+    membershipId: int("membershipId").notNull().references(() => userPackages.id, { onDelete: "restrict" }),
+    requiredDurationSeconds: int("requiredDurationSeconds").notNull(),
+    lastProgressSeconds: int("lastProgressSeconds").default(0).notNull(),
+    maxProgressSeconds: int("maxProgressSeconds").default(0).notNull(),
+    lastHeartbeatAt: timestamp("lastHeartbeatAt"),
+    startedAt: timestamp("startedAt").defaultNow().notNull(),
+    completedAt: timestamp("completedAt"),
+    status: mysqlEnum("status", ["started", "interrupted", "completed", "rejected", "expired"]).default("started").notNull(),
+    interruptionReason: varchar("interruptionReason", { length: 255 }),
+    ipHash: varchar("ipHash", { length: 128 }),
+    deviceHash: varchar("deviceHash", { length: 128 }),
+  },
+  table => [
+    uniqueIndex("video_watch_sessions_token_unique").on(table.sessionToken),
+    index("video_watch_sessions_user_video_idx").on(table.userId, table.videoId),
+    index("video_watch_sessions_video_status_idx").on(table.videoId, table.status),
+  ],
+);
+
+export const videoCompletions = mysqlTable(
+  "videoCompletions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull().references(() => users.id, { onDelete: "restrict" }),
+    videoId: int("videoId").notNull().references(() => rewardVideos.id, { onDelete: "restrict" }),
+    watchSessionId: int("watchSessionId").notNull().references(() => videoWatchSessions.id, { onDelete: "restrict" }),
+    rewardPaisa: int("rewardPaisa").notNull(),
+    completedAt: timestamp("completedAt").defaultNow().notNull(),
+  },
+  table => [
+    uniqueIndex("video_completions_user_video_unique").on(table.userId, table.videoId),
+    uniqueIndex("video_completions_session_unique").on(table.watchSessionId),
   ],
 );
 
@@ -212,6 +284,7 @@ export const ledgerEntries = mysqlTable(
     transactionType: mysqlEnum("transactionType", [
       "package_payment",
       "advertisement_reward",
+      "video_reward",
       "withdrawal_hold",
       "withdrawal_payment",
       "withdrawal_reversal",

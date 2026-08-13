@@ -1,5 +1,5 @@
 import { COOKIE_NAME } from "@shared/const";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { sdk } from "./_core/sdk";
 import { systemRouter } from "./_core/systemRouter";
@@ -8,10 +8,14 @@ import {
   completeAdSession,
   createCampaign,
   createFraudFlag,
+  createRewardVideo,
   createWithdrawal,
+  completeVideoWatchSession,
+  deleteRewardVideo,
   getAuthorizedPaymentProofUrl,
   getAdminPackages,
   getAdminPaymentProofs,
+  getAdminRewardVideos,
   getAdminFraudFlags,
   getAdminSummary,
   getAdminSettings,
@@ -23,20 +27,25 @@ import {
   getUserByOpenId,
   getLedgerHistory,
   getMemberProfile,
+  getMemberRewardVideos,
   getPublicPackages,
   getSettingMap,
   getUserPaymentProofs,
   getUserNotifications,
   getUserWithdrawals,
+  heartbeatVideoWatchSession,
+  interruptVideoWatchSession,
   listCampaigns,
   markNotificationsRead,
   reviewPaymentProof,
   startAdSession,
+  startVideoWatchSession,
   submitPaymentProof,
   upsertUser,
   updateWithdrawalStatus,
   updatePlatformSetting,
   updatePackageRules,
+  updateRewardVideo,
   updateMemberProfile,
   updateUserAccountStatus,
 } from "./db";
@@ -47,6 +56,14 @@ import { z } from "zod";
 const moneyPaisa = z.number().int().positive();
 const paymentMethod = z.enum(["jazzcash", "easypaisa", "bank_transfer"]);
 const payoutMethod = z.enum(["jazzcash", "easypaisa"]);
+const youtubeUrl = z.string().trim().url().refine(value => /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(value), "Enter a valid YouTube video URL.");
+
+function getYoutubeVideoId(value: string) {
+  const parsed = new URL(value.startsWith("http") ? value : `https://${value}`);
+  const id = parsed.hostname.includes("youtu.be") ? parsed.pathname.slice(1) : parsed.searchParams.get("v") ?? parsed.pathname.split("/").filter(Boolean).pop();
+  if (!id || !/^[A-Za-z0-9_-]{6,20}$/.test(id)) throw new Error("The YouTube URL does not contain a valid video ID.");
+  return id;
+}
 
 function toDomainError(error: unknown): never {
   throw new Error(error instanceof Error ? error.message : "The request could not be completed.");
@@ -149,6 +166,27 @@ export const appRouter = router({
       try { return await completeAdSession(ctx.user.id, input.sessionToken); } catch (error) { return toDomainError(error); }
     }),
   }),
+  videos: router({
+    available: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getMemberRewardVideos(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    start: protectedProcedure.input(z.object({ videoId: z.number().int().positive(), deviceHash: z.string().max(128).optional() })).mutation(async ({ ctx, input }) => {
+      try {
+        const forwarded = ctx.req.headers["x-forwarded-for"];
+        const ipHash = typeof forwarded === "string" ? forwarded.slice(0, 128) : undefined;
+        return await startVideoWatchSession({ userId: ctx.user.id, videoId: input.videoId, deviceHash: input.deviceHash, ipHash });
+      } catch (error) { return toDomainError(error); }
+    }),
+    heartbeat: protectedProcedure.input(z.object({ sessionToken: z.string().uuid(), progressSeconds: z.number().finite().min(0).max(14_400) })).mutation(async ({ ctx, input }) => {
+      try { return await heartbeatVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    interrupt: protectedProcedure.input(z.object({ sessionToken: z.string().uuid(), reason: z.enum(["paused", "page_left", "refresh", "closed", "seek_detected", "player_error"]) })).mutation(async ({ ctx, input }) => {
+      try { return await interruptVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    complete: protectedProcedure.input(z.object({ sessionToken: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+      try { return await completeVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+  }),
   payments: router({
     instructions: protectedProcedure.query(async () => {
       const settings = await getSettingMap();
@@ -180,10 +218,11 @@ export const appRouter = router({
         if (input.screenshot) {
           const bytes = Buffer.from(input.screenshot.base64, "base64");
           validatePaymentScreenshot({ name: input.screenshot.fileName, type: input.screenshot.mimeType, bytes: bytes.byteLength });
-          const stored = await storagePut(`payment-proofs/${ctx.user.id}/${input.screenshot.fileName}`, bytes, input.screenshot.mimeType);
+          const safeName = input.screenshot.fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+          const stored = await storagePut(`payment-proofs/${ctx.user.id}/${randomUUID()}-${safeName}`, bytes, input.screenshot.mimeType);
           screenshotKey = stored.key;
         }
-        return await submitPaymentProof({ ...input, userId: ctx.user.id, screenshotKey });
+        return await submitPaymentProof({ ...input, userId: ctx.user.id, screenshotKey, screenshotFileName: input.screenshot?.fileName, screenshotMimeType: input.screenshot?.mimeType, screenshotBytes: input.screenshot ? Buffer.from(input.screenshot.base64, "base64").byteLength : undefined });
       } catch (error) { return toDomainError(error); }
     }),
   }),
@@ -225,6 +264,18 @@ export const appRouter = router({
     }),
     reviewPayment: adminProcedure.input(z.object({ paymentProofId: z.number().int().positive(), action: z.enum(["approve", "reject"]), rejectionReason: z.string().trim().min(3).max(1_000).optional() })).mutation(async ({ ctx, input }) => {
       try { return await reviewPaymentProof({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    videos: adminProcedure.query(async () => {
+      try { return await getAdminRewardVideos(); } catch (error) { return toDomainError(error); }
+    }),
+    createVideo: adminProcedure.input(z.object({ packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), youtubeUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), sortOrder: z.number().int().min(0).max(100_000).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await createRewardVideo({ ...input, youtubeVideoId: getYoutubeVideoId(input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    updateVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive(), packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), youtubeUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), sortOrder: z.number().int().min(0).max(100_000), status: z.enum(["enabled", "disabled"]) })).mutation(async ({ ctx, input }) => {
+      try { return await updateRewardVideo({ ...input, youtubeVideoId: getYoutubeVideoId(input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    deleteVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      try { return await deleteRewardVideo({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
     withdrawals: adminProcedure.query(async () => {
       try { return await getAdminWithdrawals(); } catch (error) { return toDomainError(error); }

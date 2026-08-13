@@ -11,17 +11,21 @@ import {
   packages,
   paymentProofs,
   platformSettings,
+  rewardVideos,
   type InsertUser,
   type User,
   userPackages,
   users,
+  videoCompletions,
+  videoWatchSessions,
   wallets,
   withdrawals,
 } from "../drizzle/schema";
 import { INITIAL_PACKAGES, INITIAL_PLATFORM_SETTINGS } from "../shared/platform";
-import { calculateWithdrawalQuote, evaluateAdCompletion, isValidPakistanMobile } from "./platformRules";
+import { calculateWithdrawalQuote, evaluateAdCompletion, evaluateVideoCompletion, isValidPakistanMobile } from "./platformRules";
 import { ENV } from "./_core/env";
 import { storageGetSignedUrl } from "./storage";
+import { assertPendingPaymentDecision, assertVideoRewardNotClaimed, assertVideoSessionAuthorization } from "./workflowGuards";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -287,13 +291,15 @@ export async function completeAdSession(userId: number, sessionToken: string) {
 }
 
 export async function submitPaymentProof(input: {
-  userId: number; packageId: number; paymentMethod: "jazzcash" | "easypaisa" | "bank_transfer"; amountPaisa: number; senderAccount: string; transactionId: string; screenshotKey?: string; screenshotUrl?: string; additionalNote?: string;
+  userId: number; packageId: number; paymentMethod: "jazzcash" | "easypaisa" | "bank_transfer"; amountPaisa: number; senderAccount: string; transactionId: string; screenshotKey?: string; screenshotUrl?: string; screenshotFileName?: string; screenshotMimeType?: string; screenshotBytes?: number; additionalNote?: string;
 }) {
   const db = requireDatabase(await getDb());
   const [packageRow] = await db.select().from(packages).where(and(eq(packages.id, input.packageId), eq(packages.status, "active"))).limit(1);
   if (!packageRow) throw new Error("This membership is not currently available.");
   if (input.amountPaisa !== packageRow.pricePaisa) throw new Error("The submitted amount must match the selected membership price.");
-  const [record] = await db.insert(paymentProofs).values(input).$returningId();
+  const [latest] = await db.select({ attemptNumber: paymentProofs.attemptNumber }).from(paymentProofs).where(eq(paymentProofs.userId, input.userId)).orderBy(desc(paymentProofs.attemptNumber)).limit(1);
+  const attemptNumber = (latest?.attemptNumber ?? 0) + 1;
+  const [record] = await db.insert(paymentProofs).values({ ...input, attemptNumber }).$returningId();
   await db.insert(userPackages).values({ userId: input.userId, packageId: input.packageId, paymentProofId: record?.id, status: "pending" });
   await db.insert(notifications).values({ userId: input.userId, title: "Payment verification submitted", message: "Your membership payment proof is pending administrative review.", type: "info" });
   return record;
@@ -384,12 +390,23 @@ export async function getAdminSummary() {
   const db = requireDatabase(await getDb());
   const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
   const [pendingProofCount] = await db.select({ count: sql<number>`count(*)` }).from(paymentProofs).where(eq(paymentProofs.status, "pending"));
+  const [approvedProofCount] = await db.select({ count: sql<number>`count(*)` }).from(paymentProofs).where(eq(paymentProofs.status, "approved"));
+  const [rejectedProofCount] = await db.select({ count: sql<number>`count(*)` }).from(paymentProofs).where(eq(paymentProofs.status, "rejected"));
+  const [paymentCount] = await db.select({ count: sql<number>`count(*)` }).from(paymentProofs);
   const [pendingWithdrawalCount] = await db.select({ count: sql<number>`count(*)` }).from(withdrawals).where(inArray(withdrawals.status, ["pending", "processing"]));
   const [activeCampaignCount] = await db.select({ count: sql<number>`count(*)` }).from(adCampaigns).where(eq(adCampaigns.status, "active"));
+  const [videoCount] = await db.select({ count: sql<number>`count(*)` }).from(rewardVideos);
+  const [videoCompletionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoCompletions);
+  const [pendingVideoSessionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(eq(videoWatchSessions.status, "started"));
   const [fraudAlertCount] = await db.select({ count: sql<number>`count(*)` }).from(fraudFlags).where(eq(fraudFlags.status, "open"));
-  const [rewards] = await db.select({ amount: sql<number>`coalesce(sum(${ledgerEntries.amountPaisa}), 0)` }).from(ledgerEntries).where(eq(ledgerEntries.transactionType, "advertisement_reward"));
+  const [rewards] = await db.select({ amount: sql<number>`coalesce(sum(${ledgerEntries.amountPaisa}), 0)` }).from(ledgerEntries).where(inArray(ledgerEntries.transactionType, ["advertisement_reward", "video_reward"]));
+  const membershipCounts = await db.select({ packageName: packages.name, count: sql<number>`count(distinct ${userPackages.userId})` }).from(userPackages).innerJoin(packages, eq(userPackages.packageId, packages.id)).where(eq(userPackages.status, "active")).groupBy(packages.name);
+  const packageMembers = Object.fromEntries(membershipCounts.map(row => [row.packageName.toLowerCase(), Number(row.count)]));
   return {
     totalUsers: Number(userCount?.count ?? 0), pendingProofs: Number(pendingProofCount?.count ?? 0), pendingWithdrawals: Number(pendingWithdrawalCount?.count ?? 0),
+    approvedPayments: Number(approvedProofCount?.count ?? 0), rejectedPayments: Number(rejectedProofCount?.count ?? 0), totalPaymentSubmissions: Number(paymentCount?.count ?? 0),
+    platinumUsers: packageMembers.platinum ?? 0, goldUsers: packageMembers.gold ?? 0, diamondUsers: packageMembers.diamond ?? 0,
+    totalVideos: Number(videoCount?.count ?? 0), totalVideoCompletions: Number(videoCompletionCount?.count ?? 0), pendingVideoSessions: Number(pendingVideoSessionCount?.count ?? 0),
     activeCampaigns: Number(activeCampaignCount?.count ?? 0), fraudAlerts: Number(fraudAlertCount?.count ?? 0), rewardsDistributedPaisa: Number(rewards?.amount ?? 0),
   };
 }
@@ -402,7 +419,8 @@ export async function getAdminPaymentProofs() {
 export async function reviewPaymentProof(input: { adminUserId: number; paymentProofId: number; action: "approve" | "reject"; rejectionReason?: string; }) {
   const db = requireDatabase(await getDb());
   const [payment] = await db.select().from(paymentProofs).where(eq(paymentProofs.id, input.paymentProofId)).limit(1);
-  if (!payment || payment.status !== "pending") throw new Error("This payment proof is no longer pending.");
+  if (!payment) throw new Error("This payment proof is no longer pending.");
+  assertPendingPaymentDecision(payment.status);
   const [packageRow] = await db.select().from(packages).where(eq(packages.id, payment.packageId)).limit(1);
   if (!packageRow) throw new Error("The related package was not found.");
   const now = new Date();
@@ -536,4 +554,125 @@ export async function updatePackageRules(input: { adminUserId: number; packageId
     await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "package_rules_updated", entityType: "package", entityId: input.packageId, oldValue: { pricePaisa: existing.pricePaisa, rewardPerEligibleAdPaisa: existing.rewardPerEligibleAdPaisa, dailyAdLimit: existing.dailyAdLimit, durationDays: existing.durationDays, status: existing.status }, newValue: { pricePaisa: input.pricePaisa, rewardPerEligibleAdPaisa: input.rewardPerEligibleAdPaisa, dailyAdLimit: input.dailyAdLimit, durationDays: input.durationDays, status: input.status } });
   });
   return { success: true };
+}
+
+export async function getMemberRewardVideos(userId: number) {
+  const db = requireDatabase(await getDb());
+  const membership = await getActiveMembership(userId);
+  if (!membership) return { membership: null, videos: [] };
+  const rows = await db.select().from(rewardVideos).where(and(eq(rewardVideos.packageId, membership.package.id), eq(rewardVideos.status, "enabled"))).orderBy(rewardVideos.sortOrder, desc(rewardVideos.createdAt));
+  const completed = await db.select({ videoId: videoCompletions.videoId, completedAt: videoCompletions.completedAt, rewardPaisa: videoCompletions.rewardPaisa }).from(videoCompletions).where(eq(videoCompletions.userId, userId));
+  const sessions = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.userId, userId)).orderBy(desc(videoWatchSessions.startedAt));
+  const completionMap = new Map(completed.map(item => [item.videoId, item]));
+  const sessionMap = new Map<number, typeof sessions[number]>();
+  for (const session of sessions) if (!sessionMap.has(session.videoId)) sessionMap.set(session.videoId, session);
+  return { membership, videos: rows.map(video => ({ video, completion: completionMap.get(video.id) ?? null, session: sessionMap.get(video.id) ?? null })) };
+}
+
+export async function getAdminRewardVideos() {
+  const db = requireDatabase(await getDb());
+  return db.select({ video: rewardVideos, package: packages }).from(rewardVideos).innerJoin(packages, eq(rewardVideos.packageId, packages.id)).orderBy(packages.pricePaisa, rewardVideos.sortOrder, desc(rewardVideos.createdAt));
+}
+
+export function buildRewardVideoUpdateValues(input: { adminUserId: number; packageId: number; title: string; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; sortOrder: number; status: "enabled" | "disabled" }, existing: Pick<typeof rewardVideos.$inferSelect, "requiredDurationSeconds">) {
+  return { packageId: input.packageId, title: input.title, youtubeUrl: input.youtubeUrl, youtubeVideoId: input.youtubeVideoId, thumbnailUrl: input.thumbnailUrl?.trim() || `https://i.ytimg.com/vi/${input.youtubeVideoId}/hqdefault.jpg`, description: input.description?.trim() || null, rewardPaisa: input.rewardPaisa, requiredDurationSeconds: input.requiredDurationSeconds ?? existing.requiredDurationSeconds, sortOrder: input.sortOrder, status: input.status, updatedByUserId: input.adminUserId };
+}
+
+export async function createRewardVideo(input: { adminUserId: number; packageId: number; title: string; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; sortOrder?: number }) {
+  const db = requireDatabase(await getDb());
+  const [packageRow] = await db.select().from(packages).where(eq(packages.id, input.packageId)).limit(1);
+  if (!packageRow) throw new Error("The selected package does not exist.");
+  const [record] = await db.insert(rewardVideos).values({ ...input, requiredDurationSeconds: input.requiredDurationSeconds ?? 30, thumbnailUrl: input.thumbnailUrl?.trim() || `https://i.ytimg.com/vi/${input.youtubeVideoId}/hqdefault.jpg`, description: input.description?.trim() || null, sortOrder: input.sortOrder ?? 0, createdByUserId: input.adminUserId, updatedByUserId: input.adminUserId }).$returningId();
+  await db.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "reward_video_created", entityType: "reward_video", entityId: record?.id, newValue: { packageId: input.packageId, title: input.title, youtubeVideoId: input.youtubeVideoId, rewardPaisa: input.rewardPaisa } });
+  return record;
+}
+
+export async function updateRewardVideo(input: { adminUserId: number; videoId: number; packageId: number; title: string; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; sortOrder: number; status: "enabled" | "disabled" }) {
+  const db = requireDatabase(await getDb());
+  const [existing] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, input.videoId)).limit(1);
+  if (!existing) throw new Error("The video record was not found.");
+  const [packageRow] = await db.select({ id: packages.id }).from(packages).where(eq(packages.id, input.packageId)).limit(1);
+  if (!packageRow) throw new Error("The selected package does not exist.");
+  await db.transaction(async tx => {
+    await tx.update(rewardVideos).set(buildRewardVideoUpdateValues(input, existing)).where(eq(rewardVideos.id, input.videoId));
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "reward_video_updated", entityType: "reward_video", entityId: input.videoId, oldValue: { title: existing.title, status: existing.status, rewardPaisa: existing.rewardPaisa, sortOrder: existing.sortOrder }, newValue: { title: input.title, status: input.status, rewardPaisa: input.rewardPaisa, sortOrder: input.sortOrder } });
+  });
+  return { success: true };
+}
+
+export async function deleteRewardVideo(input: { adminUserId: number; videoId: number }) {
+  const db = requireDatabase(await getDb());
+  const [existing] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, input.videoId)).limit(1);
+  if (!existing) throw new Error("The video record was not found.");
+  const [completion] = await db.select({ id: videoCompletions.id }).from(videoCompletions).where(eq(videoCompletions.videoId, input.videoId)).limit(1);
+  if (completion) throw new Error("Videos with completed rewards cannot be deleted; disable them to preserve the audit trail.");
+  await db.transaction(async tx => {
+    await tx.delete(videoWatchSessions).where(eq(videoWatchSessions.videoId, input.videoId));
+    await tx.delete(rewardVideos).where(eq(rewardVideos.id, input.videoId));
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "reward_video_deleted", entityType: "reward_video", entityId: input.videoId, oldValue: { title: existing.title, packageId: existing.packageId } });
+  });
+  return { success: true };
+}
+
+export async function startVideoWatchSession(input: { userId: number; videoId: number; ipHash?: string; deviceHash?: string }) {
+  const db = requireDatabase(await getDb());
+  const membership = await getActiveMembership(input.userId);
+  if (!membership) throw new Error("An active membership is required to access package videos.");
+  const [video] = await db.select().from(rewardVideos).where(and(eq(rewardVideos.id, input.videoId), eq(rewardVideos.status, "enabled"), eq(rewardVideos.packageId, membership.package.id))).limit(1);
+  if (!video) throw new Error("This video is not available for your membership.");
+  const [completion] = await db.select({ id: videoCompletions.id }).from(videoCompletions).where(and(eq(videoCompletions.userId, input.userId), eq(videoCompletions.videoId, input.videoId))).limit(1);
+  assertVideoRewardNotClaimed(Boolean(completion));
+  const [active] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.userId, input.userId), eq(videoWatchSessions.videoId, input.videoId), eq(videoWatchSessions.status, "started"))).limit(1);
+  if (active) return { sessionToken: active.sessionToken, requiredDurationSeconds: active.requiredDurationSeconds, resumed: true };
+  const sessionToken = randomUUID();
+  await db.insert(videoWatchSessions).values({ sessionToken, userId: input.userId, videoId: input.videoId, membershipId: membership.membership.id, requiredDurationSeconds: video.requiredDurationSeconds, ipHash: input.ipHash, deviceHash: input.deviceHash });
+  return { sessionToken, requiredDurationSeconds: video.requiredDurationSeconds, resumed: false };
+}
+
+export async function heartbeatVideoWatchSession(input: { userId: number; sessionToken: string; progressSeconds: number }) {
+  const db = requireDatabase(await getDb());
+  const [session] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId))).limit(1);
+  if (!session || session.status !== "started") throw new Error("This video session is no longer active.");
+  const progress = Math.max(0, Math.floor(input.progressSeconds));
+  const now = new Date();
+  const anchor = session.lastHeartbeatAt ?? session.startedAt;
+  const elapsedSinceHeartbeat = Math.max(0, (now.getTime() - anchor.getTime()) / 1000);
+  if (progress + 2 < session.maxProgressSeconds || progress > session.maxProgressSeconds + elapsedSinceHeartbeat + 5) {
+    await db.update(videoWatchSessions).set({ status: "rejected", interruptionReason: "Playback progress could not be validated." }).where(eq(videoWatchSessions.id, session.id));
+    throw new Error("Video session interrupted because playback progress could not be validated.");
+  }
+  await db.update(videoWatchSessions).set({ lastProgressSeconds: progress, maxProgressSeconds: Math.max(session.maxProgressSeconds, progress), lastHeartbeatAt: now }).where(eq(videoWatchSessions.id, session.id));
+  return { maxProgressSeconds: Math.max(session.maxProgressSeconds, progress), requiredDurationSeconds: session.requiredDurationSeconds };
+}
+
+export async function interruptVideoWatchSession(input: { userId: number; sessionToken: string; reason: string }) {
+  const db = requireDatabase(await getDb());
+  await db.update(videoWatchSessions).set({ status: "interrupted", interruptionReason: input.reason.slice(0, 255) }).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId), eq(videoWatchSessions.status, "started")));
+  return { success: true };
+}
+
+export async function completeVideoWatchSession(input: { userId: number; sessionToken: string }) {
+  const db = requireDatabase(await getDb());
+  const [session] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId))).limit(1);
+  if (!session) throw new Error("This video session does not belong to your account.");
+  assertVideoSessionAuthorization({ sessionUserId: session.userId, requesterUserId: input.userId, sessionStatus: session.status });
+  const [video] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, session.videoId)).limit(1);
+  if (!video || video.status !== "enabled") throw new Error("This video is no longer eligible for rewards.");
+  const membership = await getActiveMembership(input.userId);
+  if (!membership || membership.membership.id !== session.membershipId || membership.package.id !== video.packageId) throw new Error("Your membership is no longer eligible for this video.");
+  const watchedSeconds = Math.max(session.maxProgressSeconds, session.lastProgressSeconds);
+  const completionCheck = evaluateVideoCompletion({ startedAtMs: session.startedAt.getTime(), nowMs: Date.now(), requiredSeconds: session.requiredDurationSeconds, maxProgressSeconds: watchedSeconds, priorCompletion: false, belongsToActivePackage: Boolean(membership && membership.membership.id === session.membershipId && membership.package.id === video.packageId) });
+  if (!completionCheck.eligible) throw new Error(completionCheck.reason ?? "The video has not reached a validated completion point.");
+  const wallet = await ensureWallet(input.userId);
+  const now = new Date();
+  await db.transaction(async tx => {
+    const update = await tx.update(videoWatchSessions).set({ status: "completed", completedAt: now, lastProgressSeconds: Math.max(watchedSeconds, session.requiredDurationSeconds), maxProgressSeconds: Math.max(watchedSeconds, session.requiredDurationSeconds) }).where(and(eq(videoWatchSessions.id, session.id), eq(videoWatchSessions.status, "started")));
+    const affected = (update as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 0;
+    if (affected !== 1) throw new Error("This video session has already been resolved.");
+    const [completion] = await tx.insert(videoCompletions).values({ userId: input.userId, videoId: video.id, watchSessionId: session.id, rewardPaisa: video.rewardPaisa }).$returningId();
+    await tx.update(wallets).set({ availableBalancePaisa: wallet.availableBalancePaisa + video.rewardPaisa, lifetimeEarnedPaisa: wallet.lifetimeEarnedPaisa + video.rewardPaisa }).where(eq(wallets.id, wallet.id));
+    await tx.insert(ledgerEntries).values({ transactionGroupId: randomUUID(), userId: input.userId, transactionType: "video_reward", direction: "credit", amountPaisa: video.rewardPaisa, previousAvailableBalancePaisa: wallet.availableBalancePaisa, newAvailableBalancePaisa: wallet.availableBalancePaisa + video.rewardPaisa, previousHeldBalancePaisa: wallet.heldBalancePaisa, newHeldBalancePaisa: wallet.heldBalancePaisa, relatedEntityType: "video_completion", relatedEntityId: completion?.id, description: `Validated video reward for ${video.title}` });
+    await tx.insert(notifications).values({ userId: input.userId, title: "Video reward credited", message: "Your video completion was validated and the reward was added to your balance.", type: "success" });
+  });
+  return { rewardPaisa: video.rewardPaisa };
 }

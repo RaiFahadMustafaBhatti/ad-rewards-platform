@@ -32,3 +32,23 @@
 - [x] Send already authenticated users directly from public package selection to the selected membership payment workflow.
 - [x] Verify and document signed-out and authenticated member package-selection behavior after the direct-routing update.
 - [x] Verify signed-out package selection after the direct-routing update and record both signed-out and authenticated route outcomes.
+- [x] Audit the existing campaign, package, payment-proof, storage, reward, ledger, and administrator data model before extending it.
+- [x] Add package-specific YouTube video records with title, thumbnail, URL, description, reward, ordering, enabled status, and administrative audit fields.
+- [x] Add server-validated unique video watch sessions, progress events, completion rules, and idempotent reward issuance.
+- [x] Enforce package-scoped video visibility and prevent cross-package access, repeated completion, or client-controlled reward issuance.
+- [x] Repair persistent payment-proof storage metadata and retain separate, immutable payment attempts for audit history.
+- [x] Improve administrator payment review with secure screenshot previews, full history, required rejection reasons, recorded reviewers, and idempotent decisions.
+- [x] Build member video cards and a YouTube IFrame Player watch experience with progress, interruption, and completion states.
+- [x] Build administrator video management for create, edit, reorder, enable/disable, and removal actions without altering the existing dashboard design.
+- [x] Expand administrator analytics with package memberships, video, watch-session, payment, and reward metrics.
+- [x] Add tests for payment-decision and video-reward authorization/idempotency, then validate member, payment, administrator, and security paths.
+- [x] Derive required video duration exclusively from server-owned video data and stop accepting a client-controlled duration for watch sessions.
+- [x] Show each member video’s persisted progress and interrupted or rejected state with clear status feedback.
+- [x] Add full administrator edit and reorder controls for existing package videos.
+- [x] Add tests covering payment-review idempotency, video completion authorization, and duplicate completion protections.
+- [x] Allow administrators to reassign an existing video to another package through the edit workflow and verify persisted ordering.
+- [x] Add integrated procedure-level tests for payment review and video completion authorization/idempotency paths.
+- [x] Add non-production-safe integration coverage for persisted video package reassignment and sort order without creating user-facing video records.
+- [x] Add mocked database workflow tests covering duplicate payment decisions, unauthorized video completion, and duplicate reward claims at the procedure/data-layer boundary.
+- [x] Add mocked workflow-entry tests for payment review and video completion idempotency/authorization without modifying production data.
+- [x] Verify video package reassignment and sort-order persistence through an administrator-facing query contract.

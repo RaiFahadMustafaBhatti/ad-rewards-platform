@@ -1,0 +1,1 @@
+ALTER TABLE `rewardVideos` ADD `requiredDurationSeconds` int DEFAULT 30 NOT NULL;

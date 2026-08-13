@@ -29,5 +29,7 @@ describe("administrator authorization", () => {
   it("rejects a member before invoking administrator-only operations", async () => {
     const caller = appRouter.createCaller(createContext("user"));
     await expect(caller.admin.summary()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller.admin.reviewPayment({ paymentProofId: 1, action: "approve" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(caller.admin.createVideo({ packageId: 1, title: "Secure video", youtubeUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", rewardPaisa: 100, requiredDurationSeconds: 30 })).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
