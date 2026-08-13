@@ -21,15 +21,30 @@ import {
 } from "@/components/ui/sidebar";
 import { startLogin } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users } from "lucide-react";
+import { BadgeDollarSign, Bell, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
-const menuItems = [
-  { icon: LayoutDashboard, label: "Page 1", path: "/" },
-  { icon: Users, label: "Page 2", path: "/some-path" },
+const memberMenuItems = [
+  { icon: LayoutDashboard, label: "Overview", path: "/dashboard" },
+  { icon: Megaphone, label: "Available ads", path: "/dashboard/ads" },
+  { icon: ReceiptText, label: "Earnings history", path: "/dashboard/earnings" },
+  { icon: CreditCard, label: "Membership & payment", path: "/dashboard/membership" },
+  { icon: WalletCards, label: "Withdrawals", path: "/dashboard/withdrawals" },
+  { icon: Bell, label: "Notifications", path: "/dashboard/notifications" },
+  { icon: UserCircle2, label: "Profile", path: "/dashboard/profile" },
+];
+
+const adminMenuItems = [
+  { icon: LayoutDashboard, label: "Operations", path: "/admin" },
+  { icon: ReceiptText, label: "Payment review", path: "/admin/payments" },
+  { icon: WalletCards, label: "Withdrawal review", path: "/admin/withdrawals" },
+  { icon: Megaphone, label: "Campaigns", path: "/admin/campaigns" },
+  { icon: BadgeDollarSign, label: "Package rules", path: "/admin/packages" },
+  { icon: ShieldAlert, label: "Risk controls", path: "/admin/risk" },
+  { icon: Users, label: "Member records", path: "/admin/users" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -110,6 +125,7 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
+  const menuItems = user?.role === "admin" && location.startsWith("/admin") ? adminMenuItems : memberMenuItems;
   const activeMenuItem = menuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
@@ -168,8 +184,8 @@ function DashboardLayoutContent({
               </button>
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="font-semibold tracking-tight truncate">
-                    Navigation
+                    <span className="font-semibold tracking-tight truncate">
+                    Advera
                   </span>
                 </div>
               ) : null}

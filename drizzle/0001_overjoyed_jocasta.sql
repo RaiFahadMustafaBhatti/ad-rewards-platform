@@ -1,0 +1,8 @@
+ALTER TABLE `adViews` ADD CONSTRAINT `ad_views_user_campaign_unique` UNIQUE(`userId`,`campaignId`);--> statement-breakpoint
+ALTER TABLE `adViews` ADD CONSTRAINT `adViews_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `adViews` ADD CONSTRAINT `adViews_campaignId_adCampaigns_id_fk` FOREIGN KEY (`campaignId`) REFERENCES `adCampaigns`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `paymentProofs` ADD CONSTRAINT `paymentProofs_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `paymentProofs` ADD CONSTRAINT `paymentProofs_packageId_packages_id_fk` FOREIGN KEY (`packageId`) REFERENCES `packages`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `userPackages` ADD CONSTRAINT `userPackages_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `userPackages` ADD CONSTRAINT `userPackages_packageId_packages_id_fk` FOREIGN KEY (`packageId`) REFERENCES `packages`(`id`) ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE `wallets` ADD CONSTRAINT `wallets_userId_users_id_fk` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE restrict ON UPDATE no action;

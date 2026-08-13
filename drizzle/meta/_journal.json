@@ -1,5 +1,27 @@
 {
   "version": "7",
   "dialect": "mysql",
-  "entries": []
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1786607497256,
+      "tag": "0000_special_invaders",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1786608694735,
+      "tag": "0001_overjoyed_jocasta",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1786609053716,
+      "tag": "0002_striped_texas_twister",
+      "breakpoints": true
+    }
+  ]
 }

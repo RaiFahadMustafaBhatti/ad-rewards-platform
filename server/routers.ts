@@ -1,28 +1,206 @@
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import {
+  completeAdSession,
+  createCampaign,
+  createFraudFlag,
+  createWithdrawal,
+  getAuthorizedPaymentProofUrl,
+  getAdminPackages,
+  getAdminPaymentProofs,
+  getAdminFraudFlags,
+  getAdminSummary,
+  getAdminSettings,
+  getAdminUsers,
+  getAdminWithdrawals,
+  getDashboardOverview,
+  getEligibleCampaigns,
+  getLedgerHistory,
+  getMemberProfile,
+  getPublicPackages,
+  getSettingMap,
+  getUserPaymentProofs,
+  getUserNotifications,
+  getUserWithdrawals,
+  listCampaigns,
+  markNotificationsRead,
+  reviewPaymentProof,
+  startAdSession,
+  submitPaymentProof,
+  updateWithdrawalStatus,
+  updatePlatformSetting,
+  updatePackageRules,
+  updateMemberProfile,
+  updateUserAccountStatus,
+} from "./db";
+import { storagePut } from "./storage";
+import { validatePaymentScreenshot } from "./platformRules";
+import { z } from "zod";
+
+const moneyPaisa = z.number().int().positive();
+const paymentMethod = z.enum(["jazzcash", "easypaisa", "bank_transfer"]);
+const payoutMethod = z.enum(["jazzcash", "easypaisa"]);
+
+function toDomainError(error: unknown): never {
+  throw new Error(error instanceof Error ? error.message : "The request could not be completed.");
+}
 
 export const appRouter = router({
-    // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
-      return {
-        success: true,
-      } as const;
+      return { success: true } as const;
     }),
   }),
-
-  // TODO: add feature routers here, e.g.
-  // todo: router({
-  //   list: protectedProcedure.query(({ ctx }) =>
-  //     db.getUserTodos(ctx.user.id)
-  //   ),
-  // }),
+  platform: router({
+    packages: publicProcedure.query(async () => {
+      try { return await getPublicPackages(); } catch { return []; }
+    }),
+    settings: publicProcedure.query(async () => {
+      const settings = await getSettingMap();
+      const { jazzcash_number, easypaisa_number, bank_information, payment_account_title, ...safeSettings } = settings;
+      return safeSettings;
+    }),
+  }),
+  dashboard: router({
+    overview: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getDashboardOverview(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  ads: router({
+    available: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getEligibleCampaigns(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    start: protectedProcedure.input(z.object({ campaignId: z.number().int().positive(), deviceHash: z.string().max(128).optional() })).mutation(async ({ ctx, input }) => {
+      try {
+        const forwarded = ctx.req.headers["x-forwarded-for"];
+        const ipHash = typeof forwarded === "string" ? forwarded.slice(0, 128) : undefined;
+        return await startAdSession(ctx.user.id, input.campaignId, { ipHash, deviceHash: input.deviceHash });
+      } catch (error) { return toDomainError(error); }
+    }),
+    complete: protectedProcedure.input(z.object({ sessionToken: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+      try { return await completeAdSession(ctx.user.id, input.sessionToken); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  payments: router({
+    instructions: protectedProcedure.query(async () => {
+      const settings = await getSettingMap();
+      return {
+        companyName: settings.company_name,
+        accountTitle: settings.payment_account_title,
+        jazzcashNumber: settings.jazzcash_number,
+        easypaisaNumber: settings.easypaisa_number,
+        bankInformation: settings.bank_information,
+      };
+    }),
+    list: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getUserPaymentProofs(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    proofUrl: protectedProcedure.input(z.object({ paymentProofId: z.number().int().positive() })).query(async ({ ctx, input }) => {
+      try { return await getAuthorizedPaymentProofUrl({ requester: ctx.user, paymentProofId: input.paymentProofId }); } catch (error) { return toDomainError(error); }
+    }),
+    submit: protectedProcedure.input(z.object({
+      packageId: z.number().int().positive(),
+      paymentMethod,
+      amountPaisa: moneyPaisa,
+      senderAccount: z.string().trim().min(5).max(64),
+      transactionId: z.string().trim().min(4).max(128),
+      additionalNote: z.string().trim().max(1_000).optional(),
+      screenshot: z.object({ fileName: z.string().trim().min(5).max(120), mimeType: z.string().max(64), base64: z.string().min(4).max(7_000_000) }).optional(),
+    })).mutation(async ({ ctx, input }) => {
+      try {
+        let screenshotKey: string | undefined;
+        if (input.screenshot) {
+          const bytes = Buffer.from(input.screenshot.base64, "base64");
+          validatePaymentScreenshot({ name: input.screenshot.fileName, type: input.screenshot.mimeType, bytes: bytes.byteLength });
+          const stored = await storagePut(`payment-proofs/${ctx.user.id}/${input.screenshot.fileName}`, bytes, input.screenshot.mimeType);
+          screenshotKey = stored.key;
+        }
+        return await submitPaymentProof({ ...input, userId: ctx.user.id, screenshotKey });
+      } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  withdrawals: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getUserWithdrawals(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    create: protectedProcedure.input(z.object({ amountPaisa: moneyPaisa, paymentMethod: payoutMethod, accountHolderName: z.string().trim().min(2).max(160), accountNumber: z.string().trim().regex(/^(?:\+92|92|0)3\d{9}$/) })).mutation(async ({ ctx, input }) => {
+      try { return await createWithdrawal({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  profile: router({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getMemberProfile(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    update: protectedProcedure.input(z.object({ name: z.string().trim().min(2).max(160), phone: z.string().trim().max(20).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await updateMemberProfile({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  ledger: router({
+    list: protectedProcedure.input(z.object({ period: z.enum(["today", "week", "month", "all"]).default("all") })).query(async ({ ctx, input }) => {
+      try { return await getLedgerHistory(ctx.user.id, input.period); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  notifications: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      try { return await getUserNotifications(ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    markRead: protectedProcedure.input(z.object({ notificationIds: z.array(z.number().int().positive()).optional() }).optional()).mutation(async ({ ctx, input }) => {
+      try { return await markNotificationsRead(ctx.user.id, input?.notificationIds); } catch (error) { return toDomainError(error); }
+    }),
+  }),
+  admin: router({
+    summary: adminProcedure.query(async () => {
+      try { return await getAdminSummary(); } catch (error) { return toDomainError(error); }
+    }),
+    payments: adminProcedure.query(async () => {
+      try { return await getAdminPaymentProofs(); } catch (error) { return toDomainError(error); }
+    }),
+    reviewPayment: adminProcedure.input(z.object({ paymentProofId: z.number().int().positive(), action: z.enum(["approve", "reject"]), rejectionReason: z.string().trim().min(3).max(1_000).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await reviewPaymentProof({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    withdrawals: adminProcedure.query(async () => {
+      try { return await getAdminWithdrawals(); } catch (error) { return toDomainError(error); }
+    }),
+    updateWithdrawal: adminProcedure.input(z.object({ withdrawalId: z.number().int().positive(), status: z.enum(["processing", "paid", "rejected", "cancelled"]), transactionReference: z.string().trim().min(3).max(128).optional(), adminNote: z.string().trim().max(1_000).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await updateWithdrawalStatus({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    campaigns: adminProcedure.query(async () => {
+      try { return await listCampaigns(); } catch (error) { return toDomainError(error); }
+    }),
+    createCampaign: adminProcedure.input(z.object({ title: z.string().trim().min(4).max(160), advertiser: z.string().trim().min(2).max(160), description: z.string().trim().max(2_000).optional(), mediaUrl: z.string().url().optional(), durationSeconds: z.number().int().min(5).max(900), rewardPaisa: moneyPaisa, budgetPaisa: moneyPaisa, maxImpressions: z.number().int().min(1), startAt: z.coerce.date(), endAt: z.coerce.date(), status: z.enum(["draft", "active", "paused"]).default("draft") })).mutation(async ({ ctx, input }) => {
+      try { return await createCampaign(input, ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    users: adminProcedure.query(async () => {
+      try { return await getAdminUsers(); } catch (error) { return toDomainError(error); }
+    }),
+    updateUserStatus: adminProcedure.input(z.object({ userId: z.number().int().positive(), accountStatus: z.enum(["active", "suspended", "review"]), reason: z.string().trim().max(1_000).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await updateUserAccountStatus({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    fraudFlags: adminProcedure.query(async () => {
+      try { return await getAdminFraudFlags(); } catch (error) { return toDomainError(error); }
+    }),
+    flagUser: adminProcedure.input(z.object({ userId: z.number().int().positive(), severity: z.enum(["low", "medium", "high"]), reason: z.string().trim().min(5).max(1_000) })).mutation(async ({ ctx, input }) => {
+      try { return await createFraudFlag({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    settings: adminProcedure.query(async () => {
+      try { return await getAdminSettings(); } catch (error) { return toDomainError(error); }
+    }),
+    updateSetting: adminProcedure.input(z.object({ settingKey: z.string().trim().min(2).max(96), settingValue: z.string().trim().max(10_000) })).mutation(async ({ ctx, input }) => {
+      try { return await updatePlatformSetting({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    packages: adminProcedure.query(async () => {
+      try { return await getAdminPackages(); } catch (error) { return toDomainError(error); }
+    }),
+    updatePackage: adminProcedure.input(z.object({ packageId: z.number().int().positive(), pricePaisa: moneyPaisa, rewardPerEligibleAdPaisa: moneyPaisa, dailyAdLimit: z.number().int().min(0).max(10_000), durationDays: z.number().int().positive().max(3_650), status: z.enum(["active", "inactive"]) })).mutation(async ({ ctx, input }) => {
+      try { return await updatePackageRules({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+  }),
 });
 
 export type AppRouter = typeof appRouter;

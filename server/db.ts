@@ -1,11 +1,30 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
-import { ENV } from './_core/env';
+import { randomUUID } from "node:crypto";
+import {
+  adCampaigns,
+  adViews,
+  auditLogs,
+  fraudFlags,
+  ledgerEntries,
+  notifications,
+  packages,
+  paymentProofs,
+  platformSettings,
+  type InsertUser,
+  type User,
+  userPackages,
+  users,
+  wallets,
+  withdrawals,
+} from "../drizzle/schema";
+import { INITIAL_PACKAGES, INITIAL_PLATFORM_SETTINGS } from "../shared/platform";
+import { calculateWithdrawalQuote, evaluateAdCompletion, isValidPakistanMobile } from "./platformRules";
+import { ENV } from "./_core/env";
+import { storageGetSignedUrl } from "./storage";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
@@ -18,75 +37,492 @@ export async function getDb() {
   return _db;
 }
 
+function requireDatabase<T>(db: T | null): T {
+  if (!db) throw new Error("The database is currently unavailable. Please try again shortly.");
+  return db;
+}
+
 export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
-  }
-
+  if (!user.openId) throw new Error("User openId is required for upsert");
   const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
+  if (!db) return;
+
+  const values: InsertUser = { openId: user.openId };
+  const updateSet: Record<string, unknown> = {};
+  (['name', 'email', 'loginMethod'] as const).forEach(field => {
+    if (user[field] !== undefined) {
+      values[field] = user[field] ?? null;
+      updateSet[field] = user[field] ?? null;
+    }
+  });
+  values.lastSignedIn = user.lastSignedIn ?? new Date();
+  updateSet.lastSignedIn = values.lastSignedIn;
+  if (user.role !== undefined) {
+    values.role = user.role;
+    updateSet.role = user.role;
+  } else if (user.openId === ENV.ownerOpenId) {
+    values.role = "admin";
+    updateSet.role = "admin";
   }
 
-  try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
-
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
-    }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
-  } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
-    throw error;
-  }
+  await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
 }
 
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user: database not available");
-    return undefined;
-  }
-
+  if (!db) return undefined;
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-
-  return result.length > 0 ? result[0] : undefined;
+  return result[0];
 }
 
-// TODO: add feature queries here as your schema grows.
+export async function ensureInitialPlatformData() {
+  const db = await getDb();
+  if (!db) return;
+
+  for (const item of INITIAL_PACKAGES) {
+    await db.insert(packages).values({ ...item, features: [...item.features], status: "active" }).onDuplicateKeyUpdate({
+      set: {
+        pricePaisa: item.pricePaisa,
+        rewardPerEligibleAdPaisa: item.rewardPerEligibleAdPaisa,
+        dailyAdLimit: item.dailyAdLimit,
+        durationDays: item.durationDays,
+      },
+    });
+  }
+
+  for (const [settingKey, settingValue] of Object.entries(INITIAL_PLATFORM_SETTINGS)) {
+    await db.insert(platformSettings).values({ settingKey, settingValue }).onDuplicateKeyUpdate({
+      set: { settingValue: sql`settingValue` },
+    });
+  }
+}
+
+export async function getPublicPackages() {
+  await ensureInitialPlatformData();
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(packages).where(eq(packages.status, "active")).orderBy(packages.pricePaisa);
+}
+
+export async function getSettingMap() {
+  await ensureInitialPlatformData();
+  const db = await getDb();
+  if (!db) return { ...INITIAL_PLATFORM_SETTINGS };
+  const rows = await db.select().from(platformSettings);
+  return rows.reduce<Record<string, string>>((acc, row) => {
+    acc[row.settingKey] = row.settingValue;
+    return acc;
+  }, {});
+}
+
+export async function getUserById(userId: number) {
+  const db = requireDatabase(await getDb());
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user) throw new Error("Account record not found.");
+  return user;
+}
+
+export async function ensureWallet(userId: number) {
+  const db = requireDatabase(await getDb());
+  await db.insert(wallets).values({ userId }).onDuplicateKeyUpdate({ set: { userId } });
+  const [wallet] = await db.select().from(wallets).where(eq(wallets.userId, userId)).limit(1);
+  if (!wallet) throw new Error("Wallet could not be initialized.");
+  return wallet;
+}
+
+export async function getActiveMembership(userId: number) {
+  const db = requireDatabase(await getDb());
+  const rows = await db
+    .select({ membership: userPackages, package: packages })
+    .from(userPackages)
+    .innerJoin(packages, eq(userPackages.packageId, packages.id))
+    .where(eq(userPackages.userId, userId))
+    .orderBy(desc(userPackages.createdAt));
+  const current = rows.find(row => row.membership.status === "active" && (!row.membership.expiresAt || row.membership.expiresAt > new Date()));
+  return current ?? null;
+}
+
+export async function getDashboardOverview(userId: number) {
+  const db = requireDatabase(await getDb());
+  const wallet = await ensureWallet(userId);
+  const membership = await getActiveMembership(userId);
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const [todayRewards] = await db
+    .select({ amount: sql<number>`coalesce(sum(${ledgerEntries.amountPaisa}), 0)` })
+    .from(ledgerEntries)
+    .where(and(eq(ledgerEntries.userId, userId), eq(ledgerEntries.transactionType, "advertisement_reward"), gte(ledgerEntries.createdAt, today)));
+  const [todayViews] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(adViews)
+    .where(and(eq(adViews.userId, userId), eq(adViews.status, "completed"), gte(adViews.completedAt, today)));
+  const [pendingWithdrawals] = await db
+    .select({ amount: sql<number>`coalesce(sum(${withdrawals.amountPaisa}), 0)` })
+    .from(withdrawals)
+    .where(and(eq(withdrawals.userId, userId), inArray(withdrawals.status, ["pending", "processing"])));
+  const recentLedger = await db.select().from(ledgerEntries).where(eq(ledgerEntries.userId, userId)).orderBy(desc(ledgerEntries.createdAt)).limit(8);
+  const recentNotifications = await db.select().from(notifications).where(eq(notifications.userId, userId)).orderBy(desc(notifications.createdAt)).limit(5);
+  return {
+    wallet,
+    membership,
+    todayEarningsPaisa: Number(todayRewards?.amount ?? 0),
+    todayViews: Number(todayViews?.count ?? 0),
+    pendingWithdrawalsPaisa: Number(pendingWithdrawals?.amount ?? 0),
+    recentLedger,
+    recentNotifications,
+  };
+}
+
+export async function getEligibleCampaigns(userId: number) {
+  const db = requireDatabase(await getDb());
+  const membership = await getActiveMembership(userId);
+  if (!membership) return { membership: null, campaigns: [], completedToday: 0 };
+  const now = new Date();
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const completed = await db
+    .select({ campaignId: adViews.campaignId })
+    .from(adViews)
+    .where(and(eq(adViews.userId, userId), eq(adViews.status, "completed"), gte(adViews.completedAt, today)));
+  const [count] = await db.select({ total: sql<number>`count(*)` }).from(adViews).where(and(eq(adViews.userId, userId), eq(adViews.status, "completed"), gte(adViews.completedAt, today)));
+  const campaigns = await db
+    .select()
+    .from(adCampaigns)
+    .where(and(eq(adCampaigns.status, "active"), lte(adCampaigns.startAt, now), gte(adCampaigns.endAt, now)))
+    .orderBy(desc(adCampaigns.createdAt));
+  const completedIds = new Set(completed.map(row => row.campaignId));
+  return {
+    membership,
+    completedToday: Number(count?.total ?? 0),
+    campaigns: campaigns.filter(campaign => !completedIds.has(campaign.id) && campaign.rewardsDistributedPaisa + campaign.rewardPaisa <= campaign.budgetPaisa && campaign.completedViewsCount < campaign.maxImpressions),
+  };
+}
+
+export async function startAdSession(userId: number, campaignId: number, security: { ipHash?: string; deviceHash?: string }) {
+  const db = requireDatabase(await getDb());
+  const user = await getUserById(userId);
+  if (user.accountStatus !== "active") throw new Error("Your account is not eligible to begin advertisements.");
+  const eligible = await getEligibleCampaigns(userId);
+  if (!eligible.membership) throw new Error("An active membership is required to access eligible advertisements.");
+  if (eligible.completedToday >= eligible.membership.package.dailyAdLimit) throw new Error("Your daily advertisement limit has been reached.");
+  const campaign = eligible.campaigns.find(item => item.id === campaignId);
+  if (!campaign) throw new Error("This campaign is no longer available.");
+  const [priorView] = await db.select({ id: adViews.id }).from(adViews).where(and(eq(adViews.userId, userId), eq(adViews.campaignId, campaignId))).limit(1);
+  if (priorView) throw new Error("You have already started or completed this campaign.");
+  const sessionToken = randomUUID();
+  const [view] = await db.insert(adViews).values({
+    sessionToken,
+    userId,
+    campaignId,
+    requiredSeconds: campaign.durationSeconds,
+    ipHash: security.ipHash,
+    deviceHash: security.deviceHash,
+  }).$returningId();
+  return { sessionToken, viewId: view?.id, requiredSeconds: campaign.durationSeconds };
+}
+
+export async function completeAdSession(userId: number, sessionToken: string) {
+  const db = requireDatabase(await getDb());
+  const [view] = await db.select().from(adViews).where(and(eq(adViews.sessionToken, sessionToken), eq(adViews.userId, userId))).limit(1);
+  if (!view) throw new Error("The advertisement session was not found.");
+  if (view.status !== "started") throw new Error("This advertisement session has already been resolved.");
+  const [campaign] = await db.select().from(adCampaigns).where(eq(adCampaigns.id, view.campaignId)).limit(1);
+  if (!campaign || campaign.status !== "active") throw new Error("This campaign is no longer eligible for reward.");
+  const active = await getActiveMembership(userId);
+  if (!active) throw new Error("An active membership is required to receive this reward.");
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const [count] = await db.select({ total: sql<number>`count(*)` }).from(adViews).where(and(eq(adViews.userId, userId), eq(adViews.status, "completed"), gte(adViews.completedAt, today)));
+  const check = evaluateAdCompletion({
+    startedAtMs: view.startedAt.getTime(),
+    nowMs: Date.now(),
+    requiredSeconds: view.requiredSeconds,
+    dailyCompletedViews: Number(count?.total ?? 0),
+    dailyAdLimit: active.package.dailyAdLimit,
+    campaignCompletedViews: campaign.completedViewsCount,
+    campaignMaxImpressions: campaign.maxImpressions,
+    campaignRewardPaisa: campaign.rewardPaisa,
+    campaignRemainingBudgetPaisa: campaign.budgetPaisa - campaign.rewardsDistributedPaisa,
+  });
+  if (!check.eligible) {
+    await db.update(adViews).set({ status: "rejected", rejectionReason: check.reason }).where(eq(adViews.id, view.id));
+    throw new Error(check.reason ?? "This advertisement is not eligible for a reward.");
+  }
+
+  const wallet = await ensureWallet(userId);
+  const now = new Date();
+  await db.transaction(async tx => {
+    const updateResult = await tx.update(adViews).set({ status: "completed", completedAt: now, rewardPaisa: campaign.rewardPaisa }).where(and(eq(adViews.id, view.id), eq(adViews.status, "started")));
+    const affectedRows = (updateResult as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 0;
+    if (affectedRows !== 1) throw new Error("This advertisement session has already been resolved.");
+    await tx.update(adCampaigns).set({
+      completedViewsCount: campaign.completedViewsCount + 1,
+      rewardsDistributedPaisa: campaign.rewardsDistributedPaisa + campaign.rewardPaisa,
+      status: campaign.completedViewsCount + 1 >= campaign.maxImpressions || campaign.rewardsDistributedPaisa + campaign.rewardPaisa >= campaign.budgetPaisa ? "complete" : "active",
+    }).where(eq(adCampaigns.id, campaign.id));
+    await tx.update(wallets).set({
+      availableBalancePaisa: wallet.availableBalancePaisa + campaign.rewardPaisa,
+      lifetimeEarnedPaisa: wallet.lifetimeEarnedPaisa + campaign.rewardPaisa,
+    }).where(eq(wallets.id, wallet.id));
+    await tx.insert(ledgerEntries).values({
+      transactionGroupId: randomUUID(), userId, transactionType: "advertisement_reward", direction: "credit", amountPaisa: campaign.rewardPaisa,
+      previousAvailableBalancePaisa: wallet.availableBalancePaisa, newAvailableBalancePaisa: wallet.availableBalancePaisa + campaign.rewardPaisa,
+      previousHeldBalancePaisa: wallet.heldBalancePaisa, newHeldBalancePaisa: wallet.heldBalancePaisa,
+      relatedEntityType: "ad_view", relatedEntityId: view.id, description: `Validated reward for ${campaign.title}`,
+    });
+    await tx.insert(notifications).values({ userId, title: "Advertising reward credited", message: "A completed advertisement has been validated and recorded in your balance.", type: "success" });
+  });
+  return { rewardPaisa: campaign.rewardPaisa };
+}
+
+export async function submitPaymentProof(input: {
+  userId: number; packageId: number; paymentMethod: "jazzcash" | "easypaisa" | "bank_transfer"; amountPaisa: number; senderAccount: string; transactionId: string; screenshotKey?: string; screenshotUrl?: string; additionalNote?: string;
+}) {
+  const db = requireDatabase(await getDb());
+  const [packageRow] = await db.select().from(packages).where(and(eq(packages.id, input.packageId), eq(packages.status, "active"))).limit(1);
+  if (!packageRow) throw new Error("This membership is not currently available.");
+  if (input.amountPaisa !== packageRow.pricePaisa) throw new Error("The submitted amount must match the selected membership price.");
+  const [record] = await db.insert(paymentProofs).values(input).$returningId();
+  await db.insert(userPackages).values({ userId: input.userId, packageId: input.packageId, paymentProofId: record?.id, status: "pending" });
+  await db.insert(notifications).values({ userId: input.userId, title: "Payment verification submitted", message: "Your membership payment proof is pending administrative review.", type: "info" });
+  return record;
+}
+
+export async function getUserPaymentProofs(userId: number) {
+  const db = requireDatabase(await getDb());
+  return db.select({ payment: paymentProofs, package: packages }).from(paymentProofs).innerJoin(packages, eq(paymentProofs.packageId, packages.id)).where(eq(paymentProofs.userId, userId)).orderBy(desc(paymentProofs.createdAt));
+}
+
+export async function getAuthorizedPaymentProofUrl(input: { requester: Pick<User, "id" | "role">; paymentProofId: number }) {
+  const db = requireDatabase(await getDb());
+  const [payment] = await db.select().from(paymentProofs).where(eq(paymentProofs.id, input.paymentProofId)).limit(1);
+  if (!payment?.screenshotKey) throw new Error("No payment screenshot is stored for this record.");
+  if (input.requester.role !== "admin" && input.requester.id !== payment.userId) throw new Error("You are not allowed to view this payment screenshot.");
+  return { url: await storageGetSignedUrl(payment.screenshotKey) };
+}
+
+export async function getLedgerHistory(userId: number, period: "today" | "week" | "month" | "all") {
+  const db = requireDatabase(await getDb());
+  const now = new Date();
+  const since = new Date(now);
+  if (period === "today") since.setUTCHours(0, 0, 0, 0);
+  if (period === "week") since.setUTCDate(since.getUTCDate() - 7);
+  if (period === "month") since.setUTCMonth(since.getUTCMonth() - 1);
+  return db.select().from(ledgerEntries).where(period === "all" ? eq(ledgerEntries.userId, userId) : and(eq(ledgerEntries.userId, userId), gte(ledgerEntries.createdAt, since))).orderBy(desc(ledgerEntries.createdAt)).limit(200);
+}
+
+export async function getUserNotifications(userId: number) {
+  const db = requireDatabase(await getDb());
+  return db.select().from(notifications).where(eq(notifications.userId, userId)).orderBy(desc(notifications.createdAt)).limit(100);
+}
+
+export async function markNotificationsRead(userId: number, notificationIds?: number[]) {
+  const db = requireDatabase(await getDb());
+  const now = new Date();
+  const target = notificationIds?.length ? and(eq(notifications.userId, userId), inArray(notifications.id, notificationIds)) : eq(notifications.userId, userId);
+  await db.update(notifications).set({ readAt: now }).where(target);
+  return { success: true };
+}
+
+export async function createWithdrawal(input: { userId: number; amountPaisa: number; paymentMethod: "jazzcash" | "easypaisa"; accountHolderName: string; accountNumber: string; }) {
+  const db = requireDatabase(await getDb());
+  const settings = await getSettingMap();
+  const quote = calculateWithdrawalQuote(input.amountPaisa, Number(settings.minimum_withdrawal_paisa ?? 200_000), Number(settings.withdrawal_fee_paisa ?? 15_000));
+  const wallet = await ensureWallet(input.userId);
+  if (wallet.availableBalancePaisa < quote.amountPaisa) throw new Error("Your available balance is insufficient for this withdrawal.");
+  const [record] = await db.insert(withdrawals).values({ ...input, ...quote }).$returningId();
+  await db.transaction(async tx => {
+    await tx.update(wallets).set({ availableBalancePaisa: wallet.availableBalancePaisa - quote.amountPaisa, heldBalancePaisa: wallet.heldBalancePaisa + quote.amountPaisa }).where(eq(wallets.id, wallet.id));
+    await tx.insert(ledgerEntries).values({
+      transactionGroupId: randomUUID(), userId: input.userId, transactionType: "withdrawal_hold", direction: "hold", amountPaisa: quote.amountPaisa,
+      previousAvailableBalancePaisa: wallet.availableBalancePaisa, newAvailableBalancePaisa: wallet.availableBalancePaisa - quote.amountPaisa,
+      previousHeldBalancePaisa: wallet.heldBalancePaisa, newHeldBalancePaisa: wallet.heldBalancePaisa + quote.amountPaisa,
+      relatedEntityType: "withdrawal", relatedEntityId: record?.id, description: "Withdrawal request balance hold",
+    });
+    await tx.insert(notifications).values({ userId: input.userId, title: "Withdrawal submitted", message: "Your withdrawal request is pending administrative review.", type: "info" });
+  });
+  return { withdrawalId: record?.id, ...quote };
+}
+
+export async function getUserWithdrawals(userId: number) {
+  const db = requireDatabase(await getDb());
+  return db.select().from(withdrawals).where(eq(withdrawals.userId, userId)).orderBy(desc(withdrawals.createdAt));
+}
+
+export async function getMemberProfile(userId: number) {
+  const user = await getUserById(userId);
+  const membership = await getActiveMembership(userId);
+  return { user, membership };
+}
+
+export async function updateMemberProfile(input: { userId: number; name: string; phone?: string }) {
+  const db = requireDatabase(await getDb());
+  const name = input.name.trim();
+  const phone = input.phone?.trim() || null;
+  if (name.length < 2) throw new Error("Enter a valid full name.");
+  if (phone && !isValidPakistanMobile(phone)) throw new Error("Enter a valid Pakistani mobile number.");
+  const user = await getUserById(input.userId);
+  await db.transaction(async tx => {
+    await tx.update(users).set({ name, phone }).where(eq(users.id, input.userId));
+    await tx.insert(auditLogs).values({ actorUserId: input.userId, action: "profile_updated", entityType: "user", entityId: input.userId, oldValue: { name: user.name, phone: user.phone ? "[masked]" : null }, newValue: { name, phone: phone ? "[masked]" : null } });
+  });
+  return { name, phone };
+}
+
+export async function getAdminSummary() {
+  const db = requireDatabase(await getDb());
+  const [userCount] = await db.select({ count: sql<number>`count(*)` }).from(users);
+  const [pendingProofCount] = await db.select({ count: sql<number>`count(*)` }).from(paymentProofs).where(eq(paymentProofs.status, "pending"));
+  const [pendingWithdrawalCount] = await db.select({ count: sql<number>`count(*)` }).from(withdrawals).where(inArray(withdrawals.status, ["pending", "processing"]));
+  const [activeCampaignCount] = await db.select({ count: sql<number>`count(*)` }).from(adCampaigns).where(eq(adCampaigns.status, "active"));
+  const [fraudAlertCount] = await db.select({ count: sql<number>`count(*)` }).from(fraudFlags).where(eq(fraudFlags.status, "open"));
+  const [rewards] = await db.select({ amount: sql<number>`coalesce(sum(${ledgerEntries.amountPaisa}), 0)` }).from(ledgerEntries).where(eq(ledgerEntries.transactionType, "advertisement_reward"));
+  return {
+    totalUsers: Number(userCount?.count ?? 0), pendingProofs: Number(pendingProofCount?.count ?? 0), pendingWithdrawals: Number(pendingWithdrawalCount?.count ?? 0),
+    activeCampaigns: Number(activeCampaignCount?.count ?? 0), fraudAlerts: Number(fraudAlertCount?.count ?? 0), rewardsDistributedPaisa: Number(rewards?.amount ?? 0),
+  };
+}
+
+export async function getAdminPaymentProofs() {
+  const db = requireDatabase(await getDb());
+  return db.select({ payment: paymentProofs, package: packages, user: users }).from(paymentProofs).innerJoin(packages, eq(paymentProofs.packageId, packages.id)).innerJoin(users, eq(paymentProofs.userId, users.id)).orderBy(desc(paymentProofs.createdAt));
+}
+
+export async function reviewPaymentProof(input: { adminUserId: number; paymentProofId: number; action: "approve" | "reject"; rejectionReason?: string; }) {
+  const db = requireDatabase(await getDb());
+  const [payment] = await db.select().from(paymentProofs).where(eq(paymentProofs.id, input.paymentProofId)).limit(1);
+  if (!payment || payment.status !== "pending") throw new Error("This payment proof is no longer pending.");
+  const [packageRow] = await db.select().from(packages).where(eq(packages.id, payment.packageId)).limit(1);
+  if (!packageRow) throw new Error("The related package was not found.");
+  const now = new Date();
+  if (input.action === "reject") {
+    const rejectionReason = input.rejectionReason?.trim();
+    if (!rejectionReason) throw new Error("A rejection reason is required.");
+    await db.transaction(async tx => {
+      await tx.update(paymentProofs).set({ status: "rejected", rejectionReason, reviewedByUserId: input.adminUserId, reviewedAt: now }).where(eq(paymentProofs.id, payment.id));
+      await tx.update(userPackages).set({ status: "cancelled" }).where(eq(userPackages.paymentProofId, payment.id));
+      await tx.insert(notifications).values({ userId: payment.userId, title: "Payment verification rejected", message: rejectionReason, type: "warning" });
+      await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "payment_rejected", entityType: "payment_proof", entityId: payment.id, newValue: { reason: rejectionReason } });
+    });
+    return { status: "rejected" as const };
+  }
+  const expiry = new Date(now.getTime() + packageRow.durationDays * 24 * 60 * 60 * 1000);
+  await db.transaction(async tx => {
+    await tx.update(paymentProofs).set({ status: "approved", reviewedByUserId: input.adminUserId, reviewedAt: now }).where(eq(paymentProofs.id, payment.id));
+    await tx.update(userPackages).set({ status: "active", startedAt: now, expiresAt: expiry }).where(eq(userPackages.paymentProofId, payment.id));
+    await tx.insert(ledgerEntries).values({ transactionGroupId: randomUUID(), userId: payment.userId, transactionType: "package_payment", direction: "debit", amountPaisa: 0, previousAvailableBalancePaisa: 0, newAvailableBalancePaisa: 0, previousHeldBalancePaisa: 0, newHeldBalancePaisa: 0, relatedEntityType: "payment_proof", relatedEntityId: payment.id, description: `Membership payment approved for ${packageRow.name}`, createdByUserId: input.adminUserId });
+    await tx.insert(notifications).values({ userId: payment.userId, title: "Membership activated", message: "Your payment has been verified and your membership is now active.", type: "success" });
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "payment_approved", entityType: "payment_proof", entityId: payment.id, newValue: { packageId: packageRow.id } });
+  });
+  return { status: "approved" as const };
+}
+
+export async function getAdminWithdrawals() {
+  const db = requireDatabase(await getDb());
+  return db.select({ withdrawal: withdrawals, user: users }).from(withdrawals).innerJoin(users, eq(withdrawals.userId, users.id)).orderBy(desc(withdrawals.createdAt));
+}
+
+export async function updateWithdrawalStatus(input: { adminUserId: number; withdrawalId: number; status: "processing" | "paid" | "rejected" | "cancelled"; transactionReference?: string; adminNote?: string; }) {
+  const db = requireDatabase(await getDb());
+  const [withdrawal] = await db.select().from(withdrawals).where(eq(withdrawals.id, input.withdrawalId)).limit(1);
+  if (!withdrawal || !["pending", "processing"].includes(withdrawal.status)) throw new Error("This withdrawal cannot be updated.");
+  if (input.status === "paid" && !input.transactionReference?.trim()) throw new Error("A payment reference is required before marking a withdrawal paid.");
+  const now = new Date();
+  if (input.status === "processing") {
+    await db.update(withdrawals).set({ status: "processing", adminNote: input.adminNote?.trim() ?? null, processedByUserId: input.adminUserId, processedAt: now }).where(eq(withdrawals.id, withdrawal.id));
+    return { status: "processing" as const };
+  }
+  const wallet = await ensureWallet(withdrawal.userId);
+  await db.transaction(async tx => {
+    const isReturn = input.status === "rejected" || input.status === "cancelled";
+    await tx.update(withdrawals).set({ status: input.status, adminNote: input.adminNote?.trim() ?? null, transactionReference: input.transactionReference?.trim() ?? null, processedByUserId: input.adminUserId, processedAt: now }).where(eq(withdrawals.id, withdrawal.id));
+    await tx.update(wallets).set({ availableBalancePaisa: isReturn ? wallet.availableBalancePaisa + withdrawal.amountPaisa : wallet.availableBalancePaisa, heldBalancePaisa: Math.max(0, wallet.heldBalancePaisa - withdrawal.amountPaisa) }).where(eq(wallets.id, wallet.id));
+    await tx.insert(ledgerEntries).values({
+      transactionGroupId: randomUUID(), userId: withdrawal.userId, transactionType: isReturn ? "withdrawal_reversal" : "withdrawal_payment", direction: isReturn ? "release" : "debit", amountPaisa: withdrawal.amountPaisa,
+      previousAvailableBalancePaisa: wallet.availableBalancePaisa, newAvailableBalancePaisa: isReturn ? wallet.availableBalancePaisa + withdrawal.amountPaisa : wallet.availableBalancePaisa,
+      previousHeldBalancePaisa: wallet.heldBalancePaisa, newHeldBalancePaisa: Math.max(0, wallet.heldBalancePaisa - withdrawal.amountPaisa),
+      relatedEntityType: "withdrawal", relatedEntityId: withdrawal.id, description: isReturn ? "Withdrawal balance released" : "Withdrawal payment marked paid", createdByUserId: input.adminUserId,
+    });
+    await tx.insert(notifications).values({ userId: withdrawal.userId, title: `Withdrawal ${input.status}`, message: input.status === "paid" ? "Your withdrawal has been marked paid." : "Your withdrawal has been released according to the platform rules.", type: input.status === "paid" ? "success" : "warning" });
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: `withdrawal_${input.status}`, entityType: "withdrawal", entityId: withdrawal.id, newValue: { transactionReference: input.transactionReference ?? null, note: input.adminNote ?? null } });
+  });
+  return { status: input.status };
+}
+
+export async function listCampaigns() {
+  const db = requireDatabase(await getDb());
+  return db.select().from(adCampaigns).orderBy(desc(adCampaigns.createdAt));
+}
+
+export async function createCampaign(input: Omit<typeof adCampaigns.$inferInsert, "id" | "createdAt" | "updatedAt" | "completedViewsCount" | "rewardsDistributedPaisa">, adminUserId: number) {
+  const db = requireDatabase(await getDb());
+  if (input.rewardPaisa <= 0 || input.budgetPaisa < input.rewardPaisa || input.maxImpressions <= 0 || input.durationSeconds < 5 || input.endAt <= input.startAt) throw new Error("Campaign budget, limits, duration, or dates are invalid.");
+  const [campaign] = await db.insert(adCampaigns).values(input).$returningId();
+  await db.insert(auditLogs).values({ actorUserId: adminUserId, action: "campaign_created", entityType: "campaign", entityId: campaign?.id, newValue: { title: input.title, budgetPaisa: input.budgetPaisa } });
+  return campaign;
+}
+
+export async function getAdminUsers() {
+  const db = requireDatabase(await getDb());
+  return db.select({ user: users, wallet: wallets }).from(users).leftJoin(wallets, eq(users.id, wallets.userId)).orderBy(desc(users.createdAt)).limit(100);
+}
+
+export async function updateUserAccountStatus(input: { adminUserId: number; userId: number; accountStatus: "active" | "suspended" | "review"; reason?: string }) {
+  const db = requireDatabase(await getDb());
+  const [target] = await db.select().from(users).where(eq(users.id, input.userId)).limit(1);
+  if (!target) throw new Error("The member record was not found.");
+  if (target.role === "admin") throw new Error("Administrator account status cannot be changed here.");
+  await db.transaction(async tx => {
+    await tx.update(users).set({ accountStatus: input.accountStatus }).where(eq(users.id, input.userId));
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: `user_status_${input.accountStatus}`, entityType: "user", entityId: input.userId, oldValue: { accountStatus: target.accountStatus }, newValue: { accountStatus: input.accountStatus, reason: input.reason?.trim() ?? null } });
+    await tx.insert(notifications).values({ userId: input.userId, title: "Account status updated", message: input.reason?.trim() || `Your account status is now ${input.accountStatus}.`, type: input.accountStatus === "active" ? "success" : "security" });
+  });
+  return { accountStatus: input.accountStatus };
+}
+
+export async function getAdminFraudFlags() {
+  const db = requireDatabase(await getDb());
+  return db.select({ flag: fraudFlags, user: users }).from(fraudFlags).innerJoin(users, eq(fraudFlags.userId, users.id)).orderBy(desc(fraudFlags.createdAt)).limit(100);
+}
+
+export async function createFraudFlag(input: { adminUserId: number; userId: number; severity: "low" | "medium" | "high"; reason: string }) {
+  const db = requireDatabase(await getDb());
+  const [record] = await db.insert(fraudFlags).values({ userId: input.userId, severity: input.severity, reason: input.reason.trim() }).$returningId();
+  await db.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "fraud_flag_created", entityType: "fraud_flag", entityId: record?.id, newValue: { userId: input.userId, severity: input.severity, reason: input.reason.trim() } });
+  return record;
+}
+
+export async function getAdminSettings() {
+  await ensureInitialPlatformData();
+  const db = requireDatabase(await getDb());
+  return db.select().from(platformSettings).orderBy(platformSettings.settingKey);
+}
+
+export async function updatePlatformSetting(input: { adminUserId: number; settingKey: string; settingValue: string }) {
+  const db = requireDatabase(await getDb());
+  const [existing] = await db.select().from(platformSettings).where(eq(platformSettings.settingKey, input.settingKey)).limit(1);
+  if (!existing) throw new Error("This setting key is not recognized.");
+  await db.transaction(async tx => {
+    await tx.update(platformSettings).set({ settingValue: input.settingValue.trim(), updatedByUserId: input.adminUserId }).where(eq(platformSettings.id, existing.id));
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "platform_setting_updated", entityType: "platform_setting", entityId: existing.id, oldValue: { settingValue: existing.isSensitive ? "[redacted]" : existing.settingValue }, newValue: { settingValue: existing.isSensitive ? "[redacted]" : input.settingValue.trim() } });
+  });
+  return { success: true };
+}
+
+export async function getAdminPackages() {
+  await ensureInitialPlatformData();
+  const db = requireDatabase(await getDb());
+  return db.select().from(packages).orderBy(packages.pricePaisa);
+}
+
+export async function updatePackageRules(input: { adminUserId: number; packageId: number; pricePaisa: number; rewardPerEligibleAdPaisa: number; dailyAdLimit: number; durationDays: number; status: "active" | "inactive" }) {
+  const db = requireDatabase(await getDb());
+  if (input.pricePaisa <= 0 || input.rewardPerEligibleAdPaisa <= 0 || input.dailyAdLimit < 0 || input.durationDays <= 0) throw new Error("Package price, reward, limit, or duration is invalid.");
+  const [existing] = await db.select().from(packages).where(eq(packages.id, input.packageId)).limit(1);
+  if (!existing) throw new Error("The package record was not found.");
+  await db.transaction(async tx => {
+    await tx.update(packages).set({ pricePaisa: input.pricePaisa, rewardPerEligibleAdPaisa: input.rewardPerEligibleAdPaisa, dailyAdLimit: input.dailyAdLimit, durationDays: input.durationDays, status: input.status }).where(eq(packages.id, input.packageId));
+    await tx.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "package_rules_updated", entityType: "package", entityId: input.packageId, oldValue: { pricePaisa: existing.pricePaisa, rewardPerEligibleAdPaisa: existing.rewardPerEligibleAdPaisa, dailyAdLimit: existing.dailyAdLimit, durationDays: existing.durationDays, status: existing.status }, newValue: { pricePaisa: input.pricePaisa, rewardPerEligibleAdPaisa: input.rewardPerEligibleAdPaisa, dailyAdLimit: input.dailyAdLimit, durationDays: input.durationDays, status: input.status } });
+  });
+  return { success: true };
+}
