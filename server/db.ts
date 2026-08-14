@@ -58,6 +58,37 @@ export function isCampaignEligibleForPackage(campaignPackageId: number | null, m
   return campaignPackageId === null || campaignPackageId === memberPackageId;
 }
 
+export function canBeginAssignedVideo(accountStatus: "active" | "suspended" | "review") {
+  return accountStatus === "active";
+}
+
+export function assertVideoStartEligibility(input: { accountStatus: "active" | "suspended" | "review"; hasActiveMembership: boolean; isVideoEnabled: boolean; isAssignedToMemberPackage: boolean }) {
+  if (input.accountStatus === "review") throw new Error("Your account is currently under review. Please contact support before starting reward videos.");
+  if (input.accountStatus === "suspended") throw new Error("Your account is suspended and cannot start reward videos.");
+  if (!canBeginAssignedVideo(input.accountStatus)) throw new Error("Your account cannot start reward videos.");
+  if (!input.hasActiveMembership) throw new Error("An active membership is required to access package videos.");
+  if (!input.isVideoEnabled || !input.isAssignedToMemberPackage) throw new Error("This video is not available for your membership.");
+}
+
+export type VideoStartWorkflowDependencies = {
+  user: { accountStatus: "active" | "suspended" | "review" };
+  membership: { membership: { id: number }; package: { id: number } } | null;
+  video: { id: number; packageId: number; status: "enabled" | "disabled"; requiredDurationSeconds: number } | null;
+  claimedToday?: boolean;
+  activeSession?: { sessionToken: string; requiredDurationSeconds: number; status: "started" | "eligible" } | null;
+  sessionToken?: string;
+  createSession?: (input: { sessionToken: string; userId: number; videoId: number; membershipId: number; requiredDurationSeconds: number }) => Promise<void> | void;
+};
+
+async function startVideoWatchSessionWithDependencies(input: { userId: number; videoId: number }, deps: VideoStartWorkflowDependencies) {
+  assertVideoStartEligibility({ accountStatus: deps.user.accountStatus, hasActiveMembership: Boolean(deps.membership), isVideoEnabled: deps.video?.status === "enabled", isAssignedToMemberPackage: Boolean(deps.video && deps.membership && deps.video.packageId === deps.membership.package.id) });
+  if (!deps.membership || !deps.video) throw new Error("This video is not available for your membership.");
+  if (deps.activeSession) return { sessionToken: deps.activeSession.sessionToken, requiredDurationSeconds: deps.activeSession.requiredDurationSeconds, resumed: true, claimAvailable: deps.activeSession.status === "eligible" && !deps.claimedToday, claimedToday: Boolean(deps.claimedToday), sessionStatus: deps.activeSession.status };
+  const sessionToken = deps.sessionToken ?? randomUUID();
+  await deps.createSession?.({ sessionToken, userId: input.userId, videoId: input.videoId, membershipId: deps.membership.membership.id, requiredDurationSeconds: deps.video.requiredDurationSeconds });
+  return { sessionToken, requiredDurationSeconds: deps.video.requiredDurationSeconds, resumed: false, claimAvailable: false, claimedToday: Boolean(deps.claimedToday), sessionStatus: "started" as const };
+}
+
 export function isDesignatedAdminEmail(email?: string | null) {
   return Boolean(email?.trim() && process.env.ADMIN_EMAIL?.trim() && email.trim().toLowerCase() === process.env.ADMIN_EMAIL.trim().toLowerCase());
 }
@@ -660,14 +691,14 @@ export async function deleteRewardVideo(input: { adminUserId: number; videoId: n
   return { success: true };
 }
 
-export async function startVideoWatchSession(input: { userId: number; videoId: number; ipHash?: string; deviceHash?: string }) {
+export async function startVideoWatchSession(input: { userId: number; videoId: number; ipHash?: string; deviceHash?: string }, testDependencies?: VideoStartWorkflowDependencies) {
+  if (testDependencies) return startVideoWatchSessionWithDependencies(input, testDependencies);
   const db = requireDatabase(await getDb());
   const user = await getUserById(input.userId);
-  if (user.accountStatus !== "active") throw new Error("Your account is not eligible to begin a video session.");
   const membership = await getActiveMembership(input.userId);
-  if (!membership) throw new Error("An active membership is required to access package videos.");
-  const [video] = await db.select().from(rewardVideos).where(and(eq(rewardVideos.id, input.videoId), eq(rewardVideos.status, "enabled"), eq(rewardVideos.packageId, membership.package.id))).limit(1);
-  if (!video) throw new Error("This video is not available for your membership.");
+  const [video] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, input.videoId)).limit(1);
+  assertVideoStartEligibility({ accountStatus: user.accountStatus, hasActiveMembership: Boolean(membership), isVideoEnabled: video?.status === "enabled", isAssignedToMemberPackage: Boolean(video && membership && video.packageId === membership.package.id) });
+  if (!membership || !video) throw new Error("This video is not available for your membership.");
   const settings = await getSettingMap();
   const platformDay = getPlatformDayWindow(Date.now(), settings.platform_timezone || "Asia/Karachi");
   const [completion] = await db.select({ id: videoCompletions.id }).from(videoCompletions).where(and(eq(videoCompletions.userId, input.userId), eq(videoCompletions.videoId, input.videoId), eq(videoCompletions.completedDay, platformDay.completedDay))).limit(1);

@@ -63,3 +63,8 @@
 - [x] Run type checks, tests, persistence verification, and responsive browser checks for the upgrade.
 - [x] Display eligible campaign dates and package scope in the member dashboard campaign panel.
 - [x] Add automated contract coverage for persisted administrator settings and package-scoped campaign eligibility.
+- [x] Fix the false “account is not eligible to begin a video session” error for active members assigned to a package video.
+- [x] Add a regression test for the corrected member video-session eligibility path.
+- [x] Add workflow-level coverage showing an active member with an assigned enabled package video can start a session while review and suspended accounts cannot.
+- [x] Replace the misleading generic video eligibility message with a clear account-status instruction for restricted members.
+- [x] Exercise the actual startVideoWatchSession entry point with injected member, membership, assigned-video, and session dependencies for active, review, and suspended cases.
