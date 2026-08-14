@@ -90,12 +90,33 @@ export function evaluateVideoCompletion(input: {
   nowMs: number;
   requiredSeconds: number;
   maxProgressSeconds: number;
-  priorCompletion: boolean;
+  dailyClaims: number;
+  dailyRewardLimit: number;
   belongsToActivePackage: boolean;
 }) {
-  if (input.priorCompletion) return { eligible: false, reason: "Reward already claimed for this video." } as const;
+  if (input.dailyClaims >= input.dailyRewardLimit) return { eligible: false, reason: "Reward already claimed for this video today." } as const;
   if (!input.belongsToActivePackage) return { eligible: false, reason: "This video is not available for your membership." } as const;
   if (input.maxProgressSeconds < input.requiredSeconds - 2) return { eligible: false, reason: "The video has not reached a validated completion point." } as const;
   if (input.nowMs - input.startedAtMs < (input.requiredSeconds - 2) * 1000) return { eligible: false, reason: "The required playback duration has not elapsed." } as const;
   return { eligible: true, reason: null } as const;
+}
+
+export function getPlatformDayWindow(nowMs: number, timeZone: string) {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(nowMs));
+    const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
+    const year = value("year"); const month = value("month"); const day = value("day");
+    const dateAtZoneMidnight = (y: number, m: number, d: number) => {
+      const candidate = Date.UTC(y, m - 1, d);
+      const offsetParts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(new Date(candidate));
+      const offset = (type: string) => Number(offsetParts.find(part => part.type === type)?.value);
+      return new Date(candidate - (Date.UTC(offset("year"), offset("month") - 1, offset("day"), offset("hour"), offset("minute"), offset("second")) - candidate));
+    };
+    const start = dateAtZoneMidnight(year, month, day);
+    const next = new Date(Date.UTC(year, month - 1, day + 1));
+    const end = dateAtZoneMidnight(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate());
+    return { dayKey: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`, start, end, completedDay: new Date(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T00:00:00.000Z`) };
+  } catch {
+    return getPlatformDayWindow(nowMs, "Asia/Karachi");
+  }
 }

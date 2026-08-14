@@ -11,6 +11,7 @@ import {
   createRewardVideo,
   createWithdrawal,
   completeVideoWatchSession,
+  deleteCampaign,
   deleteRewardVideo,
   getAuthorizedPaymentProofUrl,
   getAdminPackages,
@@ -43,6 +44,7 @@ import {
   submitPaymentProof,
   upsertUser,
   updateWithdrawalStatus,
+  updateCampaign,
   updatePlatformSetting,
   updatePackageRules,
   updateRewardVideo,
@@ -56,13 +58,23 @@ import { z } from "zod";
 const moneyPaisa = z.number().int().positive();
 const paymentMethod = z.enum(["jazzcash", "easypaisa", "bank_transfer"]);
 const payoutMethod = z.enum(["jazzcash", "easypaisa"]);
-const youtubeUrl = z.string().trim().url().refine(value => /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(value), "Enter a valid YouTube video URL.");
+const videoPlatform = z.enum(["youtube", "tiktok"]);
+const videoUrl = z.string().trim().url();
 
 function getYoutubeVideoId(value: string) {
   const parsed = new URL(value.startsWith("http") ? value : `https://${value}`);
   const id = parsed.hostname.includes("youtu.be") ? parsed.pathname.slice(1) : parsed.searchParams.get("v") ?? parsed.pathname.split("/").filter(Boolean).pop();
   if (!id || !/^[A-Za-z0-9_-]{6,20}$/.test(id)) throw new Error("The YouTube URL does not contain a valid video ID.");
   return id;
+}
+
+function getVideoIdentifier(platform: "youtube" | "tiktok", value: string) {
+  if (platform === "youtube") return getYoutubeVideoId(value);
+  const parsed = new URL(value.startsWith("http") ? value : `https://${value}`);
+  if (!/(^|\.)tiktok\.com$/i.test(parsed.hostname)) throw new Error("Enter a valid TikTok video URL.");
+  const match = parsed.pathname.match(/\/video\/(\d{8,24})/) ?? parsed.pathname.match(/\/player\/v1\/(\d{8,24})/);
+  if (!match?.[1]) throw new Error("Use a full TikTok post URL that includes its video ID.");
+  return match[1];
 }
 
 function toDomainError(error: unknown): never {
@@ -268,11 +280,11 @@ export const appRouter = router({
     videos: adminProcedure.query(async () => {
       try { return await getAdminRewardVideos(); } catch (error) { return toDomainError(error); }
     }),
-    createVideo: adminProcedure.input(z.object({ packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), youtubeUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), sortOrder: z.number().int().min(0).max(100_000).optional() })).mutation(async ({ ctx, input }) => {
-      try { return await createRewardVideo({ ...input, youtubeVideoId: getYoutubeVideoId(input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    createVideo: adminProcedure.input(z.object({ packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform.default("youtube"), youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1).default(1), sortOrder: z.number().int().min(0).max(100_000).optional() })).mutation(async ({ ctx, input }) => {
+      try { return await createRewardVideo({ ...input, youtubeVideoId: getVideoIdentifier(input.platform, input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
-    updateVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive(), packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), youtubeUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), sortOrder: z.number().int().min(0).max(100_000), status: z.enum(["enabled", "disabled"]) })).mutation(async ({ ctx, input }) => {
-      try { return await updateRewardVideo({ ...input, youtubeVideoId: getYoutubeVideoId(input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    updateVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive(), packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform, youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1), sortOrder: z.number().int().min(0).max(100_000), status: z.enum(["enabled", "disabled"]) })).mutation(async ({ ctx, input }) => {
+      try { return await updateRewardVideo({ ...input, youtubeVideoId: getVideoIdentifier(input.platform, input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
     deleteVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
       try { return await deleteRewardVideo({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
@@ -286,8 +298,14 @@ export const appRouter = router({
     campaigns: adminProcedure.query(async () => {
       try { return await listCampaigns(); } catch (error) { return toDomainError(error); }
     }),
-    createCampaign: adminProcedure.input(z.object({ title: z.string().trim().min(4).max(160), advertiser: z.string().trim().min(2).max(160), description: z.string().trim().max(2_000).optional(), mediaUrl: z.string().url().optional(), durationSeconds: z.number().int().min(5).max(900), rewardPaisa: moneyPaisa, budgetPaisa: moneyPaisa, maxImpressions: z.number().int().min(1), startAt: z.coerce.date(), endAt: z.coerce.date(), status: z.enum(["draft", "active", "paused"]).default("draft") })).mutation(async ({ ctx, input }) => {
+    createCampaign: adminProcedure.input(z.object({ title: z.string().trim().min(4).max(160), advertiser: z.string().trim().min(2).max(160), description: z.string().trim().max(2_000).optional(), mediaUrl: z.string().url().optional(), callToAction: z.string().trim().max(96).optional(), targetUrl: z.string().url().optional(), eligiblePackageId: z.number().int().positive().nullable().optional(), durationSeconds: z.number().int().min(5).max(900), rewardPaisa: moneyPaisa, budgetPaisa: moneyPaisa, maxImpressions: z.number().int().min(1), startAt: z.coerce.date(), endAt: z.coerce.date(), status: z.enum(["draft", "active", "paused"]).default("draft") })).mutation(async ({ ctx, input }) => {
       try { return await createCampaign(input, ctx.user.id); } catch (error) { return toDomainError(error); }
+    }),
+    updateCampaign: adminProcedure.input(z.object({ campaignId: z.number().int().positive(), title: z.string().trim().min(4).max(160), advertiser: z.string().trim().min(2).max(160), description: z.string().trim().max(2_000).optional(), mediaUrl: z.string().url().optional(), callToAction: z.string().trim().max(96).optional(), targetUrl: z.string().url().optional(), eligiblePackageId: z.number().int().positive().nullable().optional(), durationSeconds: z.number().int().min(5).max(900), rewardPaisa: moneyPaisa, budgetPaisa: moneyPaisa, maxImpressions: z.number().int().min(1), startAt: z.coerce.date(), endAt: z.coerce.date(), status: z.enum(["draft", "active", "paused"]) })).mutation(async ({ ctx, input }) => {
+      try { return await updateCampaign({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    deleteCampaign: adminProcedure.input(z.object({ campaignId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      try { return await deleteCampaign({ ...input, adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
     users: adminProcedure.query(async () => {
       try { return await getAdminUsers(); } catch (error) { return toDomainError(error); }

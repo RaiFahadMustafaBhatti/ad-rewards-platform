@@ -52,3 +52,14 @@
 - [x] Add mocked database workflow tests covering duplicate payment decisions, unauthorized video completion, and duplicate reward claims at the procedure/data-layer boundary.
 - [x] Add mocked workflow-entry tests for payment review and video completion idempotency/authorization without modifying production data.
 - [x] Verify video package reassignment and sort-order persistence through an administrator-facing query contract.
+- [x] Audit the existing persistent video, campaign, package, and platform-settings flows before extending them.
+- [x] Add database-backed daily video reward eligibility and server-validated claim semantics without blocking repeat viewing.
+- [x] Support platform-aware YouTube and TikTok videos with persistently configurable required watch duration and reward rules.
+- [x] Fix package-rule persistence and refresh the administrator UI from the saved backend record after every change.
+- [x] Make active, eligible campaigns visible in a dedicated member-dashboard section with dates and package scope.
+- [x] Add editable, persistent platform availability information to administrator and member-facing experiences.
+- [x] Improve member video states for watching, claim availability, claimed-today status, progress, and remaining opportunities.
+- [x] Add automated coverage for daily claim limits, persisted admin settings, campaign eligibility, and video authorization.
+- [x] Run type checks, tests, persistence verification, and responsive browser checks for the upgrade.
+- [x] Display eligible campaign dates and package scope in the member dashboard campaign panel.
+- [x] Add automated contract coverage for persisted administrator settings and package-scoped campaign eligibility.

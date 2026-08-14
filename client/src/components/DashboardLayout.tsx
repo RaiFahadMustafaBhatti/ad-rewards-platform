@@ -20,7 +20,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
-import { BadgeDollarSign, Bell, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, Video, WalletCards } from "lucide-react";
+import { BadgeDollarSign, Bell, Clock3, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, Video, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -44,6 +44,7 @@ const adminMenuItems = [
   { icon: Megaphone, label: "Campaigns", path: "/admin/campaigns" },
   { icon: Video, label: "Video library", path: "/admin/videos" },
   { icon: BadgeDollarSign, label: "Package rules", path: "/admin/packages" },
+  { icon: Clock3, label: "Platform availability", path: "/admin/availability" },
   { icon: ShieldAlert, label: "Risk controls", path: "/admin/risk" },
   { icon: Users, label: "Member records", path: "/admin/users" },
 ];

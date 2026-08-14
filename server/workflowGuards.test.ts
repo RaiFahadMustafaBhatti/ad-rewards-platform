@@ -9,9 +9,9 @@ describe("payment and video workflow guards", () => {
   });
 
   it("rejects unauthorized or resolved video completion attempts", () => {
-    expect(() => assertVideoSessionAuthorization({ sessionUserId: 4, requesterUserId: 4, sessionStatus: "started" })).not.toThrow();
+    expect(() => assertVideoSessionAuthorization({ sessionUserId: 4, requesterUserId: 4, sessionStatus: "eligible" })).not.toThrow();
     expect(() => assertVideoSessionAuthorization({ sessionUserId: 4, requesterUserId: 7, sessionStatus: "started" })).toThrow("does not belong");
-    expect(() => assertVideoSessionAuthorization({ sessionUserId: 4, requesterUserId: 4, sessionStatus: "completed" })).toThrow("already been resolved");
+    expect(() => assertVideoSessionAuthorization({ sessionUserId: 4, requesterUserId: 4, sessionStatus: "started" })).toThrow("not eligible");
     expect(() => assertVideoRewardNotClaimed(true)).toThrow("already claimed");
   });
 });

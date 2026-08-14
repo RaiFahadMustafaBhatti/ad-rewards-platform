@@ -3,6 +3,7 @@ import {
   calculateWithdrawalQuote,
   evaluateAdCompletion,
   evaluateVideoCompletion,
+  getPlatformDayWindow,
   isValidPakistanMobile,
   maskAccountNumber,
   validatePaymentScreenshot,
@@ -49,11 +50,16 @@ describe("platform financial and fraud rules", () => {
     expect(() => validatePaymentScreenshot({ name: "proof.webp", type: "image/webp", bytes: 1_024 })).not.toThrow();
   });
 
-  it("requires package eligibility, elapsed playback, and unique completion for a video reward", () => {
-    const input = { startedAtMs: 1_000, nowMs: 30_000, requiredSeconds: 30, maxProgressSeconds: 30, priorCompletion: false, belongsToActivePackage: true };
+  it("requires package eligibility, elapsed playback, and an unused daily reward opportunity for a video claim", () => {
+    const input = { startedAtMs: 1_000, nowMs: 30_000, requiredSeconds: 30, maxProgressSeconds: 30, dailyClaims: 0, dailyRewardLimit: 1, belongsToActivePackage: true };
     expect(evaluateVideoCompletion(input)).toEqual({ eligible: true, reason: null });
     expect(evaluateVideoCompletion({ ...input, maxProgressSeconds: 12 }).eligible).toBe(false);
-    expect(evaluateVideoCompletion({ ...input, priorCompletion: true }).reason).toContain("already claimed");
+    expect(evaluateVideoCompletion({ ...input, dailyClaims: 1 }).reason).toContain("already claimed");
     expect(evaluateVideoCompletion({ ...input, belongsToActivePackage: false }).eligible).toBe(false);
+  });
+
+  it("uses the configured platform timezone rather than the device clock to define the daily reward boundary", () => {
+    const window = getPlatformDayWindow(Date.UTC(2026, 0, 1, 20, 0, 0), "Asia/Karachi");
+    expect(window.dayKey).toBe("2026-01-02");
   });
 });

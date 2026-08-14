@@ -29,10 +29,11 @@ const MemberNotifications = lazy(async () => ({ default: (await memberActivity()
 const videoPages = () => import("@/pages/VideoPages");
 const MemberVideos = lazy(async () => ({ default: (await videoPages()).MemberVideos }));
 const AdminVideos = lazy(async () => ({ default: (await videoPages()).AdminVideos }));
+const AdminAvailability = lazy(() => import("@/pages/AdminAvailability"));
 const AdminDashboard = lazy(async () => ({ default: (await adminPages()).AdminDashboard }));
 const AdminPayments = lazy(async () => ({ default: (await adminPages()).AdminPayments }));
 const AdminWithdrawals = lazy(async () => ({ default: (await adminPages()).AdminWithdrawals }));
-const AdminCampaigns = lazy(async () => ({ default: (await adminPages()).AdminCampaigns }));
+const AdminCampaigns = lazy(() => import("@/pages/AdminCampaignManager"));
 const AdminPackages = lazy(async () => ({ default: (await adminPages()).AdminPackages }));
 const AdminRisk = lazy(async () => ({ default: (await adminPages()).AdminRisk }));
 const AdminUsers = lazy(async () => ({ default: (await adminPages()).AdminUsers }));
@@ -68,6 +69,7 @@ function Router() {
       <Route path={"/admin/withdrawals"}>{() => <AdminRoute><AdminWithdrawals /></AdminRoute>}</Route>
       <Route path={"/admin/campaigns"}>{() => <AdminRoute><AdminCampaigns /></AdminRoute>}</Route>
       <Route path={"/admin/videos"}>{() => <AdminRoute><AdminVideos /></AdminRoute>}</Route>
+      <Route path={"/admin/availability"}>{() => <AdminRoute><AdminAvailability /></AdminRoute>}</Route>
       <Route path={"/admin/packages"}>{() => <AdminRoute><AdminPackages /></AdminRoute>}</Route>
       <Route path={"/admin/risk"}>{() => <AdminRoute><AdminRisk /></AdminRoute>}</Route>
       <Route path={"/admin/users"}>{() => <AdminRoute><AdminUsers /></AdminRoute>}</Route>
