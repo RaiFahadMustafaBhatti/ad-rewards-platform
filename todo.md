@@ -68,3 +68,13 @@
 - [x] Add workflow-level coverage showing an active member with an assigned enabled package video can start a session while review and suspended accounts cannot.
 - [x] Replace the misleading generic video eligibility message with a clear account-status instruction for restricted members.
 - [x] Exercise the actual startVideoWatchSession entry point with injected member, membership, assigned-video, and session dependencies for active, review, and suspended cases.
+- [x] Audit the existing embedded-video workflow and map its session, claim, and administrative data to the external-verification requirements.
+- [x] Add secure six-digit video verification-code storage, external return metadata, verification attempt counters, and claim-state persistence through a safe migration.
+- [x] Replace embedded playback with a new-tab external-video session flow that records backend start and return timestamps.
+- [x] Enforce server-side duration return checks, code validation, per-session attempt limits, and final idempotent daily reward claims.
+- [x] Add application-level anti-abuse controls for duplicate sessions, rapid starts, stale session reuse, repeated claims, and suspicious verification patterns.
+- [x] Update administrator video management for secure verification-code creation/editing and relevant external-video analytics.
+- [x] Update member video cards and statuses for external watch sessions, return verification, code entry, claim availability, and claimed-today behavior.
+- [x] Add regression tests for code secrecy, duration checks, wrong-code locks, session ownership, duplicate claims, and daily limits.
+- [x] Verify schema persistence, type checks, tests, production build, and responsive member/admin workflows.
+- [x] Add external-flow data-layer regression coverage for session ownership, duplicate code-verified claims, and one-per-video daily reward limits.

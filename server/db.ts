@@ -26,6 +26,7 @@ import { calculateWithdrawalQuote, evaluateAdCompletion, evaluateVideoCompletion
 import { ENV } from "./_core/env";
 import { storageGetSignedUrl } from "./storage";
 import { assertPendingPaymentDecision, assertVideoRewardNotClaimed, assertVideoSessionAuthorization } from "./workflowGuards";
+import { evaluateExternalVideoReturn, hashVideoVerificationCode, matchesVideoVerificationCode, nextVerificationAttemptState, validateVideoVerificationCode } from "./externalVideoRules";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -70,11 +71,19 @@ export function assertVideoStartEligibility(input: { accountStatus: "active" | "
   if (!input.isVideoEnabled || !input.isAssignedToMemberPackage) throw new Error("This video is not available for your membership.");
 }
 
+export function assertExternalVideoClaimEligibility(input: { sessionUserId: number; requesterUserId: number; sessionStatus: string; verificationStatus: string; rewardStatus: string; dailyClaims: number; dailyRewardLimit: number }) {
+  if (input.sessionUserId !== input.requesterUserId) throw new Error("This video session does not belong to your account.");
+  if (input.rewardStatus === "claimed" || input.sessionStatus === "claimed") throw new Error("This video session has already been rewarded.");
+  if (input.sessionStatus !== "code_verified" || input.verificationStatus !== "passed") throw new Error("Verify the six-digit code after returning from the external video before claiming a reward.");
+  if (input.dailyClaims >= input.dailyRewardLimit) throw new Error("Reward already claimed for this video today.");
+}
+
 export type VideoStartWorkflowDependencies = {
   user: { accountStatus: "active" | "suspended" | "review" };
   membership: { membership: { id: number }; package: { id: number } } | null;
   video: { id: number; packageId: number; status: "enabled" | "disabled"; requiredDurationSeconds: number } | null;
   claimedToday?: boolean;
+  externalUrl?: string;
   activeSession?: { sessionToken: string; requiredDurationSeconds: number; status: "started" | "eligible" } | null;
   sessionToken?: string;
   createSession?: (input: { sessionToken: string; userId: number; videoId: number; membershipId: number; requiredDurationSeconds: number }) => Promise<void> | void;
@@ -83,10 +92,10 @@ export type VideoStartWorkflowDependencies = {
 async function startVideoWatchSessionWithDependencies(input: { userId: number; videoId: number }, deps: VideoStartWorkflowDependencies) {
   assertVideoStartEligibility({ accountStatus: deps.user.accountStatus, hasActiveMembership: Boolean(deps.membership), isVideoEnabled: deps.video?.status === "enabled", isAssignedToMemberPackage: Boolean(deps.video && deps.membership && deps.video.packageId === deps.membership.package.id) });
   if (!deps.membership || !deps.video) throw new Error("This video is not available for your membership.");
-  if (deps.activeSession) return { sessionToken: deps.activeSession.sessionToken, requiredDurationSeconds: deps.activeSession.requiredDurationSeconds, resumed: true, claimAvailable: deps.activeSession.status === "eligible" && !deps.claimedToday, claimedToday: Boolean(deps.claimedToday), sessionStatus: deps.activeSession.status };
+  if (deps.activeSession) return { sessionToken: deps.activeSession.sessionToken, requiredDurationSeconds: deps.activeSession.requiredDurationSeconds, resumed: true, claimAvailable: deps.activeSession.status === "eligible" && !deps.claimedToday, claimedToday: Boolean(deps.claimedToday), sessionStatus: deps.activeSession.status, externalUrl: deps.externalUrl ?? "" };
   const sessionToken = deps.sessionToken ?? randomUUID();
   await deps.createSession?.({ sessionToken, userId: input.userId, videoId: input.videoId, membershipId: deps.membership.membership.id, requiredDurationSeconds: deps.video.requiredDurationSeconds });
-  return { sessionToken, requiredDurationSeconds: deps.video.requiredDurationSeconds, resumed: false, claimAvailable: false, claimedToday: Boolean(deps.claimedToday), sessionStatus: "started" as const };
+  return { sessionToken, requiredDurationSeconds: deps.video.requiredDurationSeconds, resumed: false, claimAvailable: false, claimedToday: Boolean(deps.claimedToday), sessionStatus: "started" as const, externalUrl: deps.externalUrl ?? "" };
 }
 
 export function isDesignatedAdminEmail(email?: string | null) {
@@ -439,6 +448,12 @@ export async function getAdminSummary() {
   const [videoCount] = await db.select({ count: sql<number>`count(*)` }).from(rewardVideos);
   const [videoCompletionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoCompletions);
   const [pendingVideoSessionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(eq(videoWatchSessions.status, "started"));
+  const [externalVideoSessionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions);
+  const [externalActiveSessionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(inArray(videoWatchSessions.status, ["awaiting_return", "duration_verified", "code_verified"]));
+  const [externalVerifiedCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(eq(videoWatchSessions.verificationStatus, "passed"));
+  const [externalClaimedCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(eq(videoWatchSessions.rewardStatus, "claimed"));
+  const [externalFailedAttempts] = await db.select({ count: sql<number>`coalesce(sum(${videoWatchSessions.verificationAttempts}), 0)` }).from(videoWatchSessions);
+  const [suspiciousSessionCount] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(sql`${videoWatchSessions.suspiciousEventCount} > 0`);
   const [fraudAlertCount] = await db.select({ count: sql<number>`count(*)` }).from(fraudFlags).where(eq(fraudFlags.status, "open"));
   const [rewards] = await db.select({ amount: sql<number>`coalesce(sum(${ledgerEntries.amountPaisa}), 0)` }).from(ledgerEntries).where(inArray(ledgerEntries.transactionType, ["advertisement_reward", "video_reward"]));
   const membershipCounts = await db.select({ packageName: packages.name, count: sql<number>`count(distinct ${userPackages.userId})` }).from(userPackages).innerJoin(packages, eq(userPackages.packageId, packages.id)).where(eq(userPackages.status, "active")).groupBy(packages.name);
@@ -447,9 +462,18 @@ export async function getAdminSummary() {
     totalUsers: Number(userCount?.count ?? 0), pendingProofs: Number(pendingProofCount?.count ?? 0), pendingWithdrawals: Number(pendingWithdrawalCount?.count ?? 0),
     approvedPayments: Number(approvedProofCount?.count ?? 0), rejectedPayments: Number(rejectedProofCount?.count ?? 0), totalPaymentSubmissions: Number(paymentCount?.count ?? 0),
     platinumUsers: packageMembers.platinum ?? 0, goldUsers: packageMembers.gold ?? 0, diamondUsers: packageMembers.diamond ?? 0,
-    totalVideos: Number(videoCount?.count ?? 0), totalVideoCompletions: Number(videoCompletionCount?.count ?? 0), pendingVideoSessions: Number(pendingVideoSessionCount?.count ?? 0),
+    totalVideos: Number(videoCount?.count ?? 0), totalVideoCompletions: Number(videoCompletionCount?.count ?? 0), pendingVideoSessions: Number(pendingVideoSessionCount?.count ?? 0), totalExternalVideoSessions: Number(externalVideoSessionCount?.count ?? 0), activeExternalVideoSessions: Number(externalActiveSessionCount?.count ?? 0), successfulVideoCodeVerifications: Number(externalVerifiedCount?.count ?? 0), claimedVideoRewards: Number(externalClaimedCount?.count ?? 0), failedVideoVerificationAttempts: Number(externalFailedAttempts?.count ?? 0), suspiciousVideoSessions: Number(suspiciousSessionCount?.count ?? 0),
     activeCampaigns: Number(activeCampaignCount?.count ?? 0), fraudAlerts: Number(fraudAlertCount?.count ?? 0), rewardsDistributedPaisa: Number(rewards?.amount ?? 0),
   };
+}
+
+export async function getAdminExternalVideoAnalytics() {
+  const db = requireDatabase(await getDb());
+  const settings = await getSettingMap();
+  const platformDay = getPlatformDayWindow(Date.now(), settings.platform_timezone || "Asia/Karachi");
+  const dailyByVideo = await db.select({ videoId: rewardVideos.id, title: rewardVideos.title, packageName: packages.name, rewardsClaimed: sql<number>`count(${videoCompletions.id})`, rewardsPaisa: sql<number>`coalesce(sum(${videoCompletions.rewardPaisa}), 0)` }).from(videoCompletions).innerJoin(rewardVideos, eq(videoCompletions.videoId, rewardVideos.id)).innerJoin(packages, eq(rewardVideos.packageId, packages.id)).where(eq(videoCompletions.completedDay, platformDay.completedDay)).groupBy(rewardVideos.id, rewardVideos.title, packages.name).orderBy(desc(sql`count(${videoCompletions.id})`));
+  const repeatedVerificationUsers = await db.select({ userId: videoWatchSessions.userId, failedAttempts: sql<number>`coalesce(sum(${videoWatchSessions.verificationAttempts}), 0)`, suspiciousSessions: sql<number>`sum(case when ${videoWatchSessions.suspiciousEventCount} > 0 then 1 else 0 end)` }).from(videoWatchSessions).where(sql`${videoWatchSessions.verificationAttempts} > 0 or ${videoWatchSessions.suspiciousEventCount} > 0`).groupBy(videoWatchSessions.userId).orderBy(desc(sql`coalesce(sum(${videoWatchSessions.verificationAttempts}), 0)`)).limit(20);
+  return { platformDay: platformDay.dayKey, dailyByVideo: dailyByVideo.map(row => ({ ...row, rewardsClaimed: Number(row.rewardsClaimed), rewardsPaisa: Number(row.rewardsPaisa) })), repeatedVerificationUsers: repeatedVerificationUsers.map(row => ({ ...row, failedAttempts: Number(row.failedAttempts), suspiciousSessions: Number(row.suspiciousSessions) })) };
 }
 
 export async function getAdminPaymentProofs() {
@@ -635,7 +659,7 @@ export async function getMemberRewardVideos(userId: number) {
   if (!membership) return { membership: null, videos: [] };
   const settings = await getSettingMap();
   const platformDay = getPlatformDayWindow(Date.now(), settings.platform_timezone || "Asia/Karachi");
-  const rows = await db.select().from(rewardVideos).where(and(eq(rewardVideos.packageId, membership.package.id), eq(rewardVideos.status, "enabled"))).orderBy(rewardVideos.sortOrder, desc(rewardVideos.createdAt));
+  const rows = await db.select({ id: rewardVideos.id, packageId: rewardVideos.packageId, title: rewardVideos.title, platform: rewardVideos.platform, youtubeUrl: rewardVideos.youtubeUrl, youtubeVideoId: rewardVideos.youtubeVideoId, thumbnailUrl: rewardVideos.thumbnailUrl, description: rewardVideos.description, rewardPaisa: rewardVideos.rewardPaisa, requiredDurationSeconds: rewardVideos.requiredDurationSeconds, dailyRewardLimit: rewardVideos.dailyRewardLimit, verificationConfigured: sql<boolean>`${rewardVideos.verificationCodeHash} is not null`, sortOrder: rewardVideos.sortOrder, status: rewardVideos.status }).from(rewardVideos).where(and(eq(rewardVideos.packageId, membership.package.id), eq(rewardVideos.status, "enabled"))).orderBy(rewardVideos.sortOrder, desc(rewardVideos.createdAt));
   const completed = await db.select({ videoId: videoCompletions.videoId, completedAt: videoCompletions.completedAt, rewardPaisa: videoCompletions.rewardPaisa }).from(videoCompletions).where(and(eq(videoCompletions.userId, userId), eq(videoCompletions.completedDay, platformDay.completedDay)));
   const sessions = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.userId, userId)).orderBy(desc(videoWatchSessions.startedAt));
   const completionMap = new Map(completed.map(item => [item.videoId, item]));
@@ -646,25 +670,30 @@ export async function getMemberRewardVideos(userId: number) {
 
 export async function getAdminRewardVideos() {
   const db = requireDatabase(await getDb());
-  return db.select({ video: rewardVideos, package: packages }).from(rewardVideos).innerJoin(packages, eq(rewardVideos.packageId, packages.id)).orderBy(packages.pricePaisa, rewardVideos.sortOrder, desc(rewardVideos.createdAt));
+  const rows = await db.select({ video: rewardVideos, package: packages }).from(rewardVideos).innerJoin(packages, eq(rewardVideos.packageId, packages.id)).orderBy(packages.pricePaisa, rewardVideos.sortOrder, desc(rewardVideos.createdAt));
+  return rows.map(({ video, package: packageRow }) => {
+    const { verificationCodeHash, ...safeVideo } = video;
+    return { video: { ...safeVideo, hasVerificationCode: Boolean(verificationCodeHash) }, package: packageRow };
+  });
 }
 
-export function buildRewardVideoUpdateValues(input: { adminUserId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit: number; sortOrder: number; status: "enabled" | "disabled" }, existing: Pick<typeof rewardVideos.$inferSelect, "requiredDurationSeconds">) {
+export function buildRewardVideoUpdateValues(input: { adminUserId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit: number; verificationCode?: string; sortOrder: number; status: "enabled" | "disabled" }, existing: Pick<typeof rewardVideos.$inferSelect, "requiredDurationSeconds">) {
   const fallbackThumbnail = input.platform === "youtube" ? `https://i.ytimg.com/vi/${input.youtubeVideoId}/hqdefault.jpg` : null;
-  return { packageId: input.packageId, title: input.title, platform: input.platform, youtubeUrl: input.youtubeUrl, youtubeVideoId: input.youtubeVideoId, thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, rewardPaisa: input.rewardPaisa, requiredDurationSeconds: input.requiredDurationSeconds ?? existing.requiredDurationSeconds, dailyRewardLimit: input.dailyRewardLimit, sortOrder: input.sortOrder, status: input.status, updatedByUserId: input.adminUserId };
+  return { packageId: input.packageId, title: input.title, platform: input.platform, youtubeUrl: input.youtubeUrl, youtubeVideoId: input.youtubeVideoId, thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, rewardPaisa: input.rewardPaisa, requiredDurationSeconds: input.requiredDurationSeconds ?? existing.requiredDurationSeconds, dailyRewardLimit: input.dailyRewardLimit, ...(input.verificationCode ? { verificationCodeHash: hashVideoVerificationCode(input.verificationCode), verificationCodeUpdatedAt: new Date() } : {}), sortOrder: input.sortOrder, status: input.status, updatedByUserId: input.adminUserId };
 }
 
-export async function createRewardVideo(input: { adminUserId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit?: number; sortOrder?: number }) {
+export async function createRewardVideo(input: { adminUserId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit?: number; verificationCode: string; sortOrder?: number }) {
   const db = requireDatabase(await getDb());
   const [packageRow] = await db.select().from(packages).where(eq(packages.id, input.packageId)).limit(1);
   if (!packageRow) throw new Error("The selected package does not exist.");
   const fallbackThumbnail = input.platform === "youtube" ? `https://i.ytimg.com/vi/${input.youtubeVideoId}/hqdefault.jpg` : null;
-  const [record] = await db.insert(rewardVideos).values({ ...input, requiredDurationSeconds: input.requiredDurationSeconds ?? 30, dailyRewardLimit: input.dailyRewardLimit ?? 1, thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, sortOrder: input.sortOrder ?? 0, createdByUserId: input.adminUserId, updatedByUserId: input.adminUserId }).$returningId();
+  const { verificationCode, ...videoInput } = input;
+  const [record] = await db.insert(rewardVideos).values({ ...videoInput, requiredDurationSeconds: input.requiredDurationSeconds ?? 30, dailyRewardLimit: input.dailyRewardLimit ?? 1, verificationCodeHash: hashVideoVerificationCode(verificationCode), verificationCodeUpdatedAt: new Date(), thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, sortOrder: input.sortOrder ?? 0, createdByUserId: input.adminUserId, updatedByUserId: input.adminUserId }).$returningId();
   await db.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "reward_video_created", entityType: "reward_video", entityId: record?.id, newValue: { packageId: input.packageId, title: input.title, youtubeVideoId: input.youtubeVideoId, rewardPaisa: input.rewardPaisa } });
   return record;
 }
 
-export async function updateRewardVideo(input: { adminUserId: number; videoId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit: number; sortOrder: number; status: "enabled" | "disabled" }) {
+export async function updateRewardVideo(input: { adminUserId: number; videoId: number; packageId: number; title: string; platform: "youtube" | "tiktok"; youtubeUrl: string; youtubeVideoId: string; thumbnailUrl?: string; description?: string; rewardPaisa: number; requiredDurationSeconds?: number; dailyRewardLimit: number; verificationCode?: string; sortOrder: number; status: "enabled" | "disabled" }) {
   const db = requireDatabase(await getDb());
   const [existing] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, input.videoId)).limit(1);
   if (!existing) throw new Error("The video record was not found.");
@@ -699,14 +728,61 @@ export async function startVideoWatchSession(input: { userId: number; videoId: n
   const [video] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, input.videoId)).limit(1);
   assertVideoStartEligibility({ accountStatus: user.accountStatus, hasActiveMembership: Boolean(membership), isVideoEnabled: video?.status === "enabled", isAssignedToMemberPackage: Boolean(video && membership && video.packageId === membership.package.id) });
   if (!membership || !video) throw new Error("This video is not available for your membership.");
+  if (!video.verificationCodeHash) throw new Error("This video is awaiting administrator verification-code configuration and cannot be rewarded yet.");
   const settings = await getSettingMap();
   const platformDay = getPlatformDayWindow(Date.now(), settings.platform_timezone || "Asia/Karachi");
   const [completion] = await db.select({ id: videoCompletions.id }).from(videoCompletions).where(and(eq(videoCompletions.userId, input.userId), eq(videoCompletions.videoId, input.videoId), eq(videoCompletions.completedDay, platformDay.completedDay))).limit(1);
-  const [active] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.userId, input.userId), eq(videoWatchSessions.videoId, input.videoId), inArray(videoWatchSessions.status, ["started", "eligible"]))).orderBy(desc(videoWatchSessions.startedAt)).limit(1);
-  if (active) return { sessionToken: active.sessionToken, requiredDurationSeconds: active.requiredDurationSeconds, resumed: true, claimAvailable: active.status === "eligible" && !completion, claimedToday: Boolean(completion), sessionStatus: active.status };
+  const [active] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.userId, input.userId), eq(videoWatchSessions.videoId, input.videoId), inArray(videoWatchSessions.status, ["started", "awaiting_return", "duration_verified", "code_verified"]))).orderBy(desc(videoWatchSessions.startedAt)).limit(1);
+  if (active) return { sessionToken: active.sessionToken, requiredDurationSeconds: active.requiredDurationSeconds, resumed: true, claimAvailable: active.status === "code_verified" && !completion, claimedToday: Boolean(completion), sessionStatus: active.status, externalUrl: video.youtubeUrl };
+  const now = new Date();
+  const [rapidStarts] = await db.select({ count: sql<number>`count(*)` }).from(videoWatchSessions).where(and(eq(videoWatchSessions.userId, input.userId), eq(videoWatchSessions.videoId, input.videoId), gte(videoWatchSessions.startedAt, new Date(now.getTime() - 15 * 60 * 1000))));
+  if (Number(rapidStarts?.count ?? 0) >= 5) {
+    await db.insert(fraudFlags).values({ userId: input.userId, severity: "medium", reason: "Rapid repeated external video session starts detected.", relatedEntityType: "video", relatedEntityId: input.videoId });
+    throw new Error("Too many recent starts for this video. Please wait before starting another session.");
+  }
   const sessionToken = randomUUID();
-  await db.insert(videoWatchSessions).values({ sessionToken, userId: input.userId, videoId: input.videoId, membershipId: membership.membership.id, requiredDurationSeconds: video.requiredDurationSeconds, ipHash: input.ipHash, deviceHash: input.deviceHash });
-  return { sessionToken, requiredDurationSeconds: video.requiredDurationSeconds, resumed: false, claimAvailable: false, claimedToday: Boolean(completion), sessionStatus: "started" as const };
+  await db.insert(videoWatchSessions).values({ sessionToken, userId: input.userId, videoId: input.videoId, membershipId: membership.membership.id, requiredDurationSeconds: video.requiredDurationSeconds, startedAt: now, externalOpenedAt: now, status: "awaiting_return", ipHash: input.ipHash, deviceHash: input.deviceHash });
+  return { sessionToken, requiredDurationSeconds: video.requiredDurationSeconds, resumed: false, claimAvailable: false, claimedToday: Boolean(completion), sessionStatus: "awaiting_return" as const, externalUrl: video.youtubeUrl };
+}
+
+export async function verifyExternalVideoReturn(input: { userId: number; sessionToken: string }) {
+  const db = requireDatabase(await getDb());
+  const [session] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId))).limit(1);
+  if (!session) throw new Error("This video session does not belong to your account.");
+  if (session.status === "verification_locked") throw new Error("This verification session is locked. Start a fresh session to try again.");
+  if (session.status === "claimed") return { durationVerified: true, claimAvailable: false, message: "Reward already claimed today." };
+  if (!["awaiting_return", "started", "duration_verified", "code_verified"].includes(session.status)) throw new Error("This video session is no longer available.");
+  const now = new Date();
+  const result = evaluateExternalVideoReturn({ startedAtMs: session.startedAt.getTime(), returnedAtMs: now.getTime(), requiredDurationSeconds: session.requiredDurationSeconds });
+  if (!result.eligible) {
+    await db.update(videoWatchSessions).set({ returnedAt: now, status: "rejected", rewardStatus: "not_eligible", interruptionReason: result.reason, suspiciousEventCount: session.suspiciousEventCount + 1 }).where(eq(videoWatchSessions.id, session.id));
+    return { durationVerified: false, claimAvailable: false, message: result.reason, elapsedSeconds: result.elapsedSeconds, requiredDurationSeconds: session.requiredDurationSeconds };
+  }
+  if (session.status === "awaiting_return" || session.status === "started") await db.update(videoWatchSessions).set({ returnedAt: now, status: "duration_verified" }).where(eq(videoWatchSessions.id, session.id));
+  return { durationVerified: true, claimAvailable: session.status === "code_verified", message: "Duration verified. Enter the six-digit code shown in the external video.", elapsedSeconds: result.elapsedSeconds, requiredDurationSeconds: session.requiredDurationSeconds };
+}
+
+export async function verifyExternalVideoCode(input: { userId: number; sessionToken: string; code: string }) {
+  const db = requireDatabase(await getDb());
+  const submittedCode = validateVideoVerificationCode(input.code);
+  const [session] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId))).limit(1);
+  if (!session) throw new Error("This video session does not belong to your account.");
+  if (session.status === "verification_locked" || session.verificationStatus === "locked") throw new Error("Too many incorrect verification attempts. Start a fresh session to try again.");
+  if (session.status !== "duration_verified" && session.status !== "code_verified") throw new Error("Return after the required watch duration before entering the verification code.");
+  const [video] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, session.videoId)).limit(1);
+  if (!video || !video.verificationCodeHash) throw new Error("This video does not have an active verification code. Please contact support.");
+  const membership = await getActiveMembership(input.userId);
+  if (!membership || membership.membership.id !== session.membershipId || membership.package.id !== video.packageId) throw new Error("Your membership is no longer eligible for this video.");
+  const matched = matchesVideoVerificationCode(submittedCode, video.verificationCodeHash);
+  const next = nextVerificationAttemptState(session.verificationAttempts, matched);
+  const now = new Date();
+  if (!matched) {
+    await db.update(videoWatchSessions).set({ verificationAttempts: next.attempts, verificationStatus: next.status, status: next.locked ? "verification_locked" : "duration_verified", verificationLockedAt: next.locked ? now : null, lastVerificationAt: now, suspiciousEventCount: session.suspiciousEventCount + 1 }).where(eq(videoWatchSessions.id, session.id));
+    if (next.locked) await db.insert(fraudFlags).values({ userId: input.userId, severity: "medium", reason: "Video verification locked after repeated incorrect code attempts.", relatedEntityType: "video_session", relatedEntityId: session.id });
+    return { codeVerified: false, locked: next.locked, attemptsRemaining: Math.max(0, 5 - next.attempts), message: next.locked ? "Too many incorrect verification attempts. Start a fresh session to try again." : "Incorrect verification code. Please watch the assigned video and enter the code shown in it." };
+  }
+  await db.update(videoWatchSessions).set({ verificationStatus: "passed", status: "code_verified", lastVerificationAt: now }).where(eq(videoWatchSessions.id, session.id));
+  return { codeVerified: true, locked: false, attemptsRemaining: Math.max(0, 5 - session.verificationAttempts), message: "Code verified. You can now claim the reward." };
 }
 
 export async function heartbeatVideoWatchSession(input: { userId: number; sessionToken: string; progressSeconds: number }) {
@@ -741,9 +817,8 @@ export async function interruptVideoWatchSession(input: { userId: number; sessio
 
 export async function claimVideoWatchSession(input: { userId: number; sessionToken: string }) {
   const db = requireDatabase(await getDb());
-  const [session] = await db.select().from(videoWatchSessions).where(and(eq(videoWatchSessions.sessionToken, input.sessionToken), eq(videoWatchSessions.userId, input.userId))).limit(1);
-  if (!session) throw new Error("This video session does not belong to your account.");
-  assertVideoSessionAuthorization({ sessionUserId: session.userId, requesterUserId: input.userId, sessionStatus: session.status });
+  const [session] = await db.select().from(videoWatchSessions).where(eq(videoWatchSessions.sessionToken, input.sessionToken)).limit(1);
+  if (!session) throw new Error("This video session is no longer available.");
   const [video] = await db.select().from(rewardVideos).where(eq(rewardVideos.id, session.videoId)).limit(1);
   if (!video || video.status !== "enabled") throw new Error("This video is no longer eligible for rewards.");
   const membership = await getActiveMembership(input.userId);
@@ -751,13 +826,13 @@ export async function claimVideoWatchSession(input: { userId: number; sessionTok
   const settings = await getSettingMap();
   const platformDay = getPlatformDayWindow(Date.now(), settings.platform_timezone || "Asia/Karachi");
   const [dailyClaim] = await db.select({ count: sql<number>`count(*)` }).from(videoCompletions).where(and(eq(videoCompletions.userId, input.userId), eq(videoCompletions.videoId, video.id), eq(videoCompletions.completedDay, platformDay.completedDay)));
-  const watchedSeconds = Math.max(session.maxProgressSeconds, session.lastProgressSeconds);
-  const completionCheck = evaluateVideoCompletion({ startedAtMs: session.startedAt.getTime(), nowMs: Date.now(), requiredSeconds: session.requiredDurationSeconds, maxProgressSeconds: watchedSeconds, dailyClaims: Number(dailyClaim?.count ?? 0), dailyRewardLimit: video.dailyRewardLimit, belongsToActivePackage: Boolean(membership && membership.membership.id === session.membershipId && membership.package.id === video.packageId) });
-  if (!completionCheck.eligible) throw new Error(completionCheck.reason ?? "The video has not reached a validated completion point.");
+  assertExternalVideoClaimEligibility({ sessionUserId: session.userId, requesterUserId: input.userId, sessionStatus: session.status, verificationStatus: session.verificationStatus, rewardStatus: session.rewardStatus, dailyClaims: Number(dailyClaim?.count ?? 0), dailyRewardLimit: video.dailyRewardLimit });
+  const durationCheck = evaluateExternalVideoReturn({ startedAtMs: session.startedAt.getTime(), returnedAtMs: Date.now(), requiredDurationSeconds: session.requiredDurationSeconds });
+  if (!durationCheck.eligible) throw new Error(durationCheck.reason ?? "The required watch duration has not elapsed.");
   const wallet = await ensureWallet(input.userId);
   const now = new Date();
   await db.transaction(async tx => {
-    const update = await tx.update(videoWatchSessions).set({ status: "claimed", completedAt: now, lastProgressSeconds: Math.max(watchedSeconds, session.requiredDurationSeconds), maxProgressSeconds: Math.max(watchedSeconds, session.requiredDurationSeconds) }).where(and(eq(videoWatchSessions.id, session.id), eq(videoWatchSessions.status, "eligible")));
+    const update = await tx.update(videoWatchSessions).set({ status: "claimed", rewardStatus: "claimed", completedAt: now }).where(and(eq(videoWatchSessions.id, session.id), eq(videoWatchSessions.status, "code_verified"), eq(videoWatchSessions.verificationStatus, "passed")));
     const affected = (update as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 0;
     if (affected !== 1) throw new Error("This video session has already been resolved.");
     const [completion] = await tx.insert(videoCompletions).values({ userId: input.userId, videoId: video.id, watchSessionId: session.id, rewardPaisa: video.rewardPaisa, completedDay: platformDay.completedDay }).$returningId();

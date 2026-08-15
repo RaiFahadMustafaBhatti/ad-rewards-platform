@@ -43,6 +43,13 @@
       "when": 1786692964305,
       "tag": "0005_certain_black_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1786798709025,
+      "tag": "0006_wide_alex_power",
+      "breakpoints": true
     }
   ]
 }

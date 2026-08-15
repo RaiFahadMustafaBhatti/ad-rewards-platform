@@ -20,6 +20,7 @@ import {
   getAdminFraudFlags,
   getAdminSummary,
   getAdminSettings,
+  getAdminExternalVideoAnalytics,
   getAdminUsers,
   getAdminWithdrawals,
   getDashboardOverview,
@@ -34,8 +35,6 @@ import {
   getUserPaymentProofs,
   getUserNotifications,
   getUserWithdrawals,
-  heartbeatVideoWatchSession,
-  interruptVideoWatchSession,
   listCampaigns,
   markNotificationsRead,
   reviewPaymentProof,
@@ -50,6 +49,8 @@ import {
   updateRewardVideo,
   updateMemberProfile,
   updateUserAccountStatus,
+  verifyExternalVideoCode,
+  verifyExternalVideoReturn,
 } from "./db";
 import { storagePut } from "./storage";
 import { validatePaymentScreenshot } from "./platformRules";
@@ -60,6 +61,7 @@ const paymentMethod = z.enum(["jazzcash", "easypaisa", "bank_transfer"]);
 const payoutMethod = z.enum(["jazzcash", "easypaisa"]);
 const videoPlatform = z.enum(["youtube", "tiktok"]);
 const videoUrl = z.string().trim().url();
+const videoVerificationCode = z.string().trim().regex(/^\d{6}$/, "Enter exactly six digits for the verification code.");
 
 function getYoutubeVideoId(value: string) {
   const parsed = new URL(value.startsWith("http") ? value : `https://${value}`);
@@ -189,11 +191,11 @@ export const appRouter = router({
         return await startVideoWatchSession({ userId: ctx.user.id, videoId: input.videoId, deviceHash: input.deviceHash, ipHash });
       } catch (error) { return toDomainError(error); }
     }),
-    heartbeat: protectedProcedure.input(z.object({ sessionToken: z.string().uuid(), progressSeconds: z.number().finite().min(0).max(14_400) })).mutation(async ({ ctx, input }) => {
-      try { return await heartbeatVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    verifyReturn: protectedProcedure.input(z.object({ sessionToken: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+      try { return await verifyExternalVideoReturn({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
-    interrupt: protectedProcedure.input(z.object({ sessionToken: z.string().uuid(), reason: z.enum(["paused", "page_left", "refresh", "closed", "seek_detected", "player_error"]) })).mutation(async ({ ctx, input }) => {
-      try { return await interruptVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    verifyCode: protectedProcedure.input(z.object({ sessionToken: z.string().uuid(), code: videoVerificationCode })).mutation(async ({ ctx, input }) => {
+      try { return await verifyExternalVideoCode({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
     complete: protectedProcedure.input(z.object({ sessionToken: z.string().uuid() })).mutation(async ({ ctx, input }) => {
       try { return await completeVideoWatchSession({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
@@ -271,6 +273,9 @@ export const appRouter = router({
     summary: adminProcedure.query(async () => {
       try { return await getAdminSummary(); } catch (error) { return toDomainError(error); }
     }),
+    externalVideoAnalytics: adminProcedure.query(async () => {
+      try { return await getAdminExternalVideoAnalytics(); } catch (error) { return toDomainError(error); }
+    }),
     payments: adminProcedure.query(async () => {
       try { return await getAdminPaymentProofs(); } catch (error) { return toDomainError(error); }
     }),
@@ -280,10 +285,10 @@ export const appRouter = router({
     videos: adminProcedure.query(async () => {
       try { return await getAdminRewardVideos(); } catch (error) { return toDomainError(error); }
     }),
-    createVideo: adminProcedure.input(z.object({ packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform.default("youtube"), youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1).default(1), sortOrder: z.number().int().min(0).max(100_000).optional() })).mutation(async ({ ctx, input }) => {
+    createVideo: adminProcedure.input(z.object({ packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform.default("youtube"), youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1).default(1), verificationCode: videoVerificationCode, sortOrder: z.number().int().min(0).max(100_000).optional() })).mutation(async ({ ctx, input }) => {
       try { return await createRewardVideo({ ...input, youtubeVideoId: getVideoIdentifier(input.platform, input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
-    updateVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive(), packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform, youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1), sortOrder: z.number().int().min(0).max(100_000), status: z.enum(["enabled", "disabled"]) })).mutation(async ({ ctx, input }) => {
+    updateVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive(), packageId: z.number().int().positive(), title: z.string().trim().min(3).max(180), platform: videoPlatform, youtubeUrl: videoUrl, thumbnailUrl: z.string().trim().url().max(512).optional(), description: z.string().trim().max(2_000).optional(), rewardPaisa: moneyPaisa, requiredDurationSeconds: z.number().int().min(5).max(14_400).optional(), dailyRewardLimit: z.number().int().min(0).max(1), verificationCode: videoVerificationCode.optional(), sortOrder: z.number().int().min(0).max(100_000), status: z.enum(["enabled", "disabled"]) })).mutation(async ({ ctx, input }) => {
       try { return await updateRewardVideo({ ...input, youtubeVideoId: getVideoIdentifier(input.platform, input.youtubeUrl), adminUserId: ctx.user.id }); } catch (error) { return toDomainError(error); }
     }),
     deleteVideo: adminProcedure.input(z.object({ videoId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
