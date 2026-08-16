@@ -16,8 +16,9 @@ export default function AdminAccess() {
     try {
       await login.mutateAsync({ email, password });
       await utils.auth.me.invalidate();
+      await utils.auth.me.fetch();
       setPassword("");
-      setLocation("/admin");
+      window.location.assign("/admin");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Administrator sign-in could not be completed.");
     }

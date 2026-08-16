@@ -78,3 +78,7 @@
 - [x] Add regression tests for code secrecy, duration checks, wrong-code locks, session ownership, duplicate claims, and daily limits.
 - [x] Verify schema persistence, type checks, tests, production build, and responsive member/admin workflows.
 - [x] Add external-flow data-layer regression coverage for session ownership, duplicate code-verified claims, and one-per-video daily reward limits.
+- [x] Diagnose why the configured local administrator credentials do not open the administrator dashboard.
+- [x] Repair the administrator sign-in or redirect flow and add regression coverage for the configured access route.
+- [x] Verify the configured administrator reaches the administrator dashboard after local sign-in.
+- [x] Perform a browser-level local administrator sign-in from /admin-access and verify that /admin renders after the session refresh.
