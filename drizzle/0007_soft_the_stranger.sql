@@ -1,0 +1,1 @@
+ALTER TABLE `rewardVideos` MODIFY COLUMN `requiredDurationSeconds` int NOT NULL DEFAULT 10;

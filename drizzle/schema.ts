@@ -197,7 +197,7 @@ export const rewardVideos = mysqlTable(
     thumbnailUrl: varchar("thumbnailUrl", { length: 512 }),
     description: text("description"),
     rewardPaisa: int("rewardPaisa").notNull(),
-    requiredDurationSeconds: int("requiredDurationSeconds").default(30).notNull(),
+    requiredDurationSeconds: int("requiredDurationSeconds").default(10).notNull(),
     dailyRewardLimit: int("dailyRewardLimit").default(1).notNull(),
     verificationCodeHash: varchar("verificationCodeHash", { length: 255 }),
     verificationCodeUpdatedAt: timestamp("verificationCodeUpdatedAt"),

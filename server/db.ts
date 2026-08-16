@@ -28,6 +28,8 @@ import { storageGetSignedUrl } from "./storage";
 import { assertPendingPaymentDecision, assertVideoRewardNotClaimed, assertVideoSessionAuthorization } from "./workflowGuards";
 import { evaluateExternalVideoReturn, hashVideoVerificationCode, matchesVideoVerificationCode, nextVerificationAttemptState, validateVideoVerificationCode } from "./externalVideoRules";
 
+export const DEFAULT_REWARD_VIDEO_DURATION_SECONDS = 10;
+
 let _db: ReturnType<typeof drizzle> | null = null;
 
 export async function getDb() {
@@ -688,7 +690,7 @@ export async function createRewardVideo(input: { adminUserId: number; packageId:
   if (!packageRow) throw new Error("The selected package does not exist.");
   const fallbackThumbnail = input.platform === "youtube" ? `https://i.ytimg.com/vi/${input.youtubeVideoId}/hqdefault.jpg` : null;
   const { verificationCode, ...videoInput } = input;
-  const [record] = await db.insert(rewardVideos).values({ ...videoInput, requiredDurationSeconds: input.requiredDurationSeconds ?? 30, dailyRewardLimit: input.dailyRewardLimit ?? 1, verificationCodeHash: hashVideoVerificationCode(verificationCode), verificationCodeUpdatedAt: new Date(), thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, sortOrder: input.sortOrder ?? 0, createdByUserId: input.adminUserId, updatedByUserId: input.adminUserId }).$returningId();
+  const [record] = await db.insert(rewardVideos).values({ ...videoInput, requiredDurationSeconds: input.requiredDurationSeconds ?? DEFAULT_REWARD_VIDEO_DURATION_SECONDS, dailyRewardLimit: input.dailyRewardLimit ?? 1, verificationCodeHash: hashVideoVerificationCode(verificationCode), verificationCodeUpdatedAt: new Date(), thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail, description: input.description?.trim() || null, sortOrder: input.sortOrder ?? 0, createdByUserId: input.adminUserId, updatedByUserId: input.adminUserId }).$returningId();
   await db.insert(auditLogs).values({ actorUserId: input.adminUserId, action: "reward_video_created", entityType: "reward_video", entityId: record?.id, newValue: { packageId: input.packageId, title: input.title, youtubeVideoId: input.youtubeVideoId, rewardPaisa: input.rewardPaisa } });
   return record;
 }

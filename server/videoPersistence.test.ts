@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRewardVideoUpdateValues } from "./db";
+import { buildRewardVideoUpdateValues, DEFAULT_REWARD_VIDEO_DURATION_SECONDS } from "./db";
 
 describe("reward video persistence values", () => {
   it("persists a package reassignment and explicit display order through the data-layer update contract", () => {
@@ -7,5 +7,9 @@ describe("reward video persistence values", () => {
     expect(values).toMatchObject({ packageId: 3, platform: "tiktok", sortOrder: 8, requiredDurationSeconds: 45, dailyRewardLimit: 1, updatedByUserId: 9 });
     expect(values.verificationCodeHash).toBeTruthy();
     expect(values.verificationCodeHash).not.toContain("482731");
+  });
+
+  it("keeps the existing ten-second watch experience as the creation default", () => {
+    expect(DEFAULT_REWARD_VIDEO_DURATION_SECONDS).toBe(10);
   });
 });
