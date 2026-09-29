@@ -1,0 +1,1 @@
+{"$schema":"https://openapi.vercel.sh/vercel.json","buildCommand":"pnpm build","installCommand":"pnpm install","outputDirectory":"dist/public","rewrites":[{"destination":"/api/index","source":"/api/:path*"},{"destination":"/index.html","source":"/(.*)"}]}
