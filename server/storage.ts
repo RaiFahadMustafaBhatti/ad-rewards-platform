@@ -100,7 +100,9 @@ export async function storagePut(
         "Content-Type": contentType,
         "Content-Length": String(body.length),
       },
-      body: Buffer.from(body).toString("utf8"),
+      // Pass raw bytes: converting binary data to a UTF-8 string mangles it
+      // and makes the signed payload hash mismatch the actual body (B2 403).
+      body: Buffer.from(body),
     },
     { accessKeyId: config.keyId, secretAccessKey: config.applicationKey },
   );
