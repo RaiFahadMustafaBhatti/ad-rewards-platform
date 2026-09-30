@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express, { type Express } from "express";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
+import { registerFirebaseAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -16,9 +16,10 @@ import { createContext } from "./context";
  * serverless bundle stays lean. Static files are served by Express only in
  * the long-running server; on Vercel the CDN serves dist/public directly.
  *
- * All persistent state lives outside the process: the Manus MySQL database
- * (DATABASE_URL) and S3 uploads via Forge presigned URLs. Nothing is written
- * to the local filesystem, so this is safe on serverless infrastructure.
+ * All persistent state lives outside the process: Firestore (via the
+ * Firebase Admin SDK) for data and the configured upload storage for files.
+ * Nothing is written to the local filesystem, so this is safe on serverless
+ * infrastructure.
  */
 export function createApp(): Express {
   const app = express();
@@ -28,7 +29,7 @@ export function createApp(): Express {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   registerStorageProxy(app);
-  registerOAuthRoutes(app);
+  registerFirebaseAuthRoutes(app);
 
   // tRPC API
   app.use(

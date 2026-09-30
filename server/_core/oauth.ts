@@ -1,66 +1,70 @@
-import { COOKIE_NAME, ONE_YEAR_MS, OAUTH_STATE_COOKIE, decodeOAuthState } from "@shared/const";
-import { parse as parseCookieHeader } from "cookie";
+import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
+import { getFirebaseAuth } from "../firebase";
 import { getSessionCookieOptions } from "./cookies";
-import { sdk } from "./sdk";
+import { createSessionToken } from "./session";
 
-function getQueryParam(req: Request, key: string): string | undefined {
-  const value = req.query[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-export function registerOAuthRoutes(app: Express) {
-  app.get("/api/oauth/callback", async (req: Request, res: Response) => {
-    const code = getQueryParam(req, "code");
-    const state = getQueryParam(req, "state");
-
-    if (!code || !state) {
-      res.status(400).json({ error: "code and state are required" });
+/**
+ * Member sign-in via Firebase Authentication (Google provider).
+ *
+ * The client signs in with the Firebase client SDK (Google popup), then POSTs
+ * the Firebase ID token here. The server verifies the token with the Admin
+ * SDK, upserts the member record, and sets the first-party `app_session_id`
+ * HTTP-only cookie via a stateless HS256 session token.
+ */
+export function registerFirebaseAuthRoutes(app: Express) {
+  app.post("/api/auth/firebase", async (req: Request, res: Response) => {
+    const idToken = typeof req.body?.idToken === "string" ? req.body.idToken : "";
+    if (!idToken) {
+      res.status(400).json({ error: "idToken is required" });
       return;
     }
 
-    // CSRF guard: the nonce in `state` must match the one-time cookie that
-    // startLogin set in the browser that began this login. An attacker can
-    // forge `state`, but cannot plant this cookie in the victim's browser.
-    const { nonce, returnTo } = decodeOAuthState(state);
-    const expectedNonce = parseCookieHeader(req.headers.cookie ?? "")[OAUTH_STATE_COOKIE];
-    if (!nonce || nonce !== expectedNonce) {
-      res.status(403).json({ error: "invalid oauth state" });
+    const auth = getFirebaseAuth();
+    if (!auth) {
+      res.status(503).json({ error: "Member sign-in is not configured yet. Please try again later." });
       return;
     }
-    res.clearCookie(OAUTH_STATE_COOKIE, { ...getSessionCookieOptions(req) });
 
     try {
-      const tokenResponse = await sdk.exchangeCodeForToken(code, state);
-      const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
-
-      if (!userInfo.openId) {
-        res.status(400).json({ error: "openId missing from user info" });
+      const decoded = await auth.verifyIdToken(idToken);
+      if (!decoded.uid) {
+        res.status(401).json({ error: "The sign-in token is invalid." });
         return;
       }
 
+      const openId = `firebase:${decoded.uid}`;
       await db.upsertUser({
-        openId: userInfo.openId,
-        name: userInfo.name || null,
-        email: userInfo.email ?? null,
-        loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
+        openId,
+        name: typeof decoded.name === "string" ? decoded.name : null,
+        email: typeof decoded.email === "string" ? decoded.email : null,
+        loginMethod: "firebase_google",
         lastSignedIn: new Date(),
       });
 
-      const sessionToken = await sdk.createSessionToken(userInfo.openId, {
-        name: userInfo.name || "",
+      const user = await db.getUserByOpenId(openId);
+      if (!user) {
+        res.status(500).json({ error: "The member account could not be prepared." });
+        return;
+      }
+      if (user.accountStatus !== "active") {
+        res.status(403).json({ error: "This account is not active. Please contact support." });
+        return;
+      }
+
+      const sessionToken = await createSessionToken(user.openId, {
+        name: user.name ?? "",
         expiresInMs: ONE_YEAR_MS,
       });
-
-      const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-
-      const destination = returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/dashboard";
-      res.redirect(302, destination);
+      res.cookie(COOKIE_NAME, sessionToken, {
+        ...getSessionCookieOptions(req),
+        maxAge: ONE_YEAR_MS,
+      });
+      res.json({ success: true });
     } catch (error) {
-      console.error("[OAuth] Callback failed", error);
-      res.status(500).json({ error: "OAuth callback failed" });
+      console.error("[FirebaseAuth] Token exchange failed", error);
+      res.status(401).json({ error: "The sign-in token could not be verified. Please try again." });
     }
   });
 }

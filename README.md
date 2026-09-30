@@ -10,11 +10,11 @@ FMB Earning Hub is a full-stack advertising rewards and digital membership appli
 |---|---|
 | Public experience | Responsive landing page, package comparison, process explanation, FAQ, contact placeholders, and policy/disclosure routes. |
 | Memberships | Configurable Platinum, Gold, and Diamond package records with editable price, eligible-ad reward, daily limit, duration, and availability. |
-| Payment verification | Authenticated manual proof submission with image validation, transaction-ID uniqueness, S3 storage keys, approval/rejection flow, notifications, and audit entries. |
+| Payment verification | Authenticated manual proof submission with image validation, transaction-ID uniqueness, private B2 storage keys, approval/rejection flow, notifications, and audit entries. |
 | Ad campaigns | Administrator campaign creation; protected member sessions; server-side duration, eligibility, daily-limit, campaign-budget, impression-limit, and duplicate-view checks. |
 | Ledger and withdrawals | Wallet balances, held balances, ledger entries, withdrawal quotes, account masking, reviewed withdrawal status transitions, and recorded payment references. |
 | Administration | Operational metrics, payment and withdrawal queues, campaign creation, package rules, user status controls, fraud flags, platform settings, and audit logging. |
-| Security | OAuth-backed session access, role-gated procedures, server-side input validation, screenshot MIME/extension/size validation, secure storage-key access, and relationship constraints. |
+| Security | Firebase Auth-backed session access, role-gated procedures, server-side input validation, screenshot MIME/extension/size validation, private storage keys with owner/admin-only signed URLs, and relationship constraints. |
 
 ## Data Model and Migrations
 
@@ -26,7 +26,7 @@ All monetary values are stored in **paisa** as integers. The ledger records bala
 
 ```bash
 pnpm install
-pnpm drizzle-kit migrate
+cp .env.example .env   # then fill in Firebase + B2 values (see below)
 pnpm dev
 ```
 
@@ -38,36 +38,60 @@ pnpm test
 pnpm build
 ```
 
+## Firebase Migration
+
+This branch migrates the platform off the Manus stack:
+
+| Before (Manus) | After |
+|---|---|
+| MySQL via `DATABASE_URL` + Drizzle | Firestore (`asia-south1`) via the Firebase Admin SDK (`server/db.ts` keeps the same API, numeric IDs, and transactional ledger writes) |
+| Manus OAuth member login | Firebase Authentication (Google): client signs in with the Firebase SDK, POSTs the ID token to `/api/auth/firebase`, the server verifies it and issues a first-party HS256 session cookie (`server/_core/session.ts`) |
+| Local admin login via `sdk.createSessionToken` | Same `ADMIN_EMAIL` / `ADMIN_PASSWORD` login, now signing sessions with `server/_core/session.ts` — works independently of Firebase |
+| Forge/S3 presigned uploads | Backblaze B2 private bucket (S3-compatible, free tier: 10 GB storage + 1 GB/day egress). Payment proofs stay private: short-lived presigned URLs minted server-side only after owner/admin authorization |
+
+Setup (one time):
+
+1. Copy `.env.example` to `.env` and fill in the server values.
+2. Firebase Admin service account: Firebase console > Project settings >
+   Service accounts > Generate new private key. Download it **yourself** and
+   copy `project_id`, `client_email`, `private_key` into
+   `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`.
+   The private key never goes through chat or the repo.
+3. Backblaze B2: create a **private** bucket + application key, set
+   `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`, `B2_ENDPOINT`.
+4. Client build: set the `VITE_FIREBASE_*` values from the Firebase web app
+   config (public identifiers, safe to expose).
+5. Deploy Firestore rules + indexes:
+   `firebase deploy --only firestore:rules,firestore:indexes`
+   (rules deny all direct client access — everything goes through the server).
+
 ## Deploying on Vercel
 
 The repo is Vercel-ready (`vercel.json` + `api/index.ts` serverless entrypoint).
-The database stays on the Manus MySQL host — only the app code moves to Vercel.
+All persistent state lives outside the function: Firestore for data and
+Backblaze B2 for files.
 
 1. Push this repo to GitHub and import it in Vercel (**Add New → Project**).
 2. Vercel auto-detects the build (`pnpm build`) and output directory
    (`dist/public`). No code changes needed.
 3. Set these **Environment Variables** in the Vercel project settings
-   (all environments):
-   - `DATABASE_URL` — the Manus MySQL connection string (kept as-is;
-     all accounts, wallets, and ledger data stay there).
-   - `JWT_SECRET` — secret used to sign session cookies (must match the
-     value the Manus deployment used, otherwise existing sessions expire).
-   - `BUILT_IN_FORGE_API_URL` / `BUILT_IN_FORGE_API_KEY` — file uploads
-     (payment proofs) via S3 presigned URLs.
-   - `OAUTH_SERVER_URL`, `OWNER_OPEN_ID`, `VITE_APP_ID`,
-     `VITE_OAUTH_PORTAL_URL`, `VITE_FRONTEND_FORGE_API_URL`,
-     `VITE_FRONTEND_FORGE_API_KEY` — copy from the Manus deployment.
-     (`VITE_*` values are baked in at build time.)
-   - Local admin login (email + password via `ADMIN_EMAIL` / `ADMIN_PASSWORD`)
-     keeps working even if Manus OAuth is unreachable from Vercel.
+   (all environments). (`VITE_*` values are baked in at build time.)
+   - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
+     — Firebase Admin service account (download the JSON yourself from the
+     Firebase console; paste the three fields, never the file into chat).
+   - `JWT_SECRET` — secret used to sign session cookies.
+   - `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`, `B2_ENDPOINT` —
+     private payment-proof storage via Backblaze B2.
+   - `ADMIN_EMAIL`, `ADMIN_PASSWORD` — local administrator login, works
+     independently of Firebase member login.
+   - `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`,
+     `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_STORAGE_BUCKET`,
+     `VITE_FIREBASE_MESSAGING_SENDER_ID`, `VITE_FIREBASE_APP_ID`,
+     `VITE_FIREBASE_MEASUREMENT_ID` — public Firebase web config.
 4. Deploy. Vercel's CDN serves the client; `/api/*` requests
-   (`/api/trpc`, `/api/oauth/*`, storage proxy) run as a serverless
-   function. Sessions are stateless JWT cookies and uploads go to S3,
+   (`/api/trpc`, `/api/auth/firebase`, storage proxy) run as a serverless
+   function. Sessions are stateless JWT cookies and uploads go to B2,
    so nothing depends on the function's ephemeral filesystem.
-
-> If the Manus MySQL host restricts connections to the Manus network,
-> allowlist Vercel's IPs or move the database — otherwise the function
-> cannot reach it.
 
 
 ## Production Configuration Required

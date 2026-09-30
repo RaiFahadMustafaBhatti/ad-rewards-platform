@@ -9,10 +9,9 @@ type UseAuthOptions = {
 };
 
 export function useAuth(options?: UseAuthOptions) {
-  // Login is started via startLogin() in the effect below, only when we actually
-  // navigate — never during render. startLogin() mints a one-time nonce + writes
-  // the state cookie, so calling it per render would overwrite the cookie and
-  // desync it from an in-flight login's `state`.
+  // Login is started via startLogin() in the effect below - it opens the
+  // Google sign-in popup. Never call it during render; call it from an event
+  // handler or effect only.
   const { redirectOnUnauthenticated = false, redirectPath } = options ?? {};
   const utils = trpc.useUtils();
 
@@ -39,11 +38,11 @@ export function useAuth(options?: UseAuthOptions) {
       }
       throw error;
     } finally {
-      // Clear the Preview auto-login token mirrored into sessionStorage, so
-      // header-based sessions (Safari ITP / WebView) are logged out too. The
-      // backend cookie is cleared by the logout mutation.
+      // Clear the mirrored session token, so header-based sessions
+      // (Safari ITP / WebView) are logged out too. The backend cookie is
+      // cleared by the logout mutation.
       try {
-        sessionStorage.removeItem("manus-cookie");
+        sessionStorage.removeItem("fmb-session");
       } catch {}
       utils.auth.me.setData(undefined, null);
       await utils.auth.me.invalidate();
@@ -52,7 +51,7 @@ export function useAuth(options?: UseAuthOptions) {
 
   const state = useMemo(() => {
     localStorage.setItem(
-      "manus-runtime-user-info",
+      "fmb-runtime-user-info",
       JSON.stringify(meQuery.data)
     );
     return {
@@ -76,11 +75,13 @@ export function useAuth(options?: UseAuthOptions) {
     if (typeof window === "undefined") return;
     if (redirectPath && window.location.pathname === redirectPath) return;
 
-    // Navigate at this moment only. startLogin() mints the nonce + cookie itself.
+    // Sign in at this moment only (popup). Never call during render.
     if (redirectPath) {
       window.location.href = redirectPath;
     } else {
-      startLogin();
+      startLogin().catch((error: unknown) => {
+        console.error("[Login] Google sign-in failed", error);
+      });
     }
   }, [
     redirectOnUnauthenticated,

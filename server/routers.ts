@@ -1,7 +1,7 @@
 import { COOKIE_NAME } from "@shared/const";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { getSessionCookieOptions } from "./_core/cookies";
-import { sdk } from "./_core/sdk";
+import { createSessionToken } from "./_core/session";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
@@ -140,7 +140,7 @@ export const appRouter = router({
         admin = await getUserByOpenId(admin.openId);
       }
       if (!admin) throw new Error("The administrator account could not be activated.");
-      const session = await sdk.createSessionToken(admin.openId, { name: admin.name ?? "FMB Earning Hub Administrator", expiresInMs: 8 * 60 * 60 * 1_000 });
+      const session = await createSessionToken(admin.openId, { name: admin.name ?? "FMB Earning Hub Administrator", expiresInMs: 8 * 60 * 60 * 1_000 });
       ctx.res.cookie(COOKIE_NAME, session, { ...getSessionCookieOptions(ctx.req), maxAge: 8 * 60 * 60 * 1_000 });
       return { success: true } as const;
     }),

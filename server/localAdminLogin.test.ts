@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("./db", async () => ({ ...(await vi.importActual<typeof import("./db")>("./db")), getUserByEmail: mocks.getUserByEmail, getUserByOpenId: mocks.getUserByOpenId, upsertUser: mocks.upsertUser }));
-vi.mock("./_core/sdk", () => ({ sdk: { createSessionToken: mocks.createSessionToken } }));
+vi.mock("./_core/session", () => ({ createSessionToken: mocks.createSessionToken }));
 
 import { appRouter } from "./routers";
 

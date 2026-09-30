@@ -18,7 +18,9 @@ const redirectToLoginIfUnauthorized = (error: unknown) => {
 
   if (!isUnauthorized) return;
 
-  startLogin();
+  startLogin().catch((error: unknown) => {
+    console.error("[Login] Google sign-in failed", error);
+  });
 };
 
 queryClient.getQueryCache().subscribe(event => {
@@ -43,12 +45,13 @@ const trpcClient = trpc.createClient({
       url: "/api/trpc",
       transformer: superjson,
       headers() {
-        // Preview auto-login fallback: when the browser blocks iframe cookies
-        // (Safari ITP / private browsing / WebView), the runtime mirrors the
-        // session into sessionStorage so we can forward it as a Bearer token.
-        // The regular OAuth cookie flow keeps working and takes priority server-side.
+        // Session fallback: when the browser blocks third-party cookies
+        // (Safari ITP / private browsing / WebView), the session cookie
+        // mirrored into sessionStorage after login is forwarded as a Bearer
+        // token. The regular cookie flow keeps working and takes priority
+        // server-side.
         try {
-          const raw = sessionStorage.getItem("manus-cookie");
+          const raw = sessionStorage.getItem("fmb-session");
           if (raw) {
             const prefix = `${COOKIE_NAME}=`;
             const pair = raw.split(";").find(s => s.trim().startsWith(prefix));

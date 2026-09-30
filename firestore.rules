@@ -1,0 +1,17 @@
+rules_version = '2';
+
+// FMB Earning Hub - Firestore security rules.
+//
+// ALL reads and writes go through the Express server using the Firebase
+// Admin SDK, which bypasses these rules. No client (web/mobile) is allowed
+// to touch Firestore directly, so every rule below denies access. Member
+// authentication happens via Firebase Auth ID tokens verified server-side
+// (POST /api/auth/firebase); authorization checks live in server/db.ts and
+// server/routers.ts.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

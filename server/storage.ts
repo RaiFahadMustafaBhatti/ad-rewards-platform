@@ -1,20 +1,55 @@
-// Preconfigured storage helpers for Manus WebDev templates
-// Uploads via Forge Server presigned URL to S3 (PUT direct).
-// Downloads return /manus-storage/{key} paths served via 307 redirect.
+// Private file storage on Backblaze B2 (S3-compatible API).
+//
+// Why B2: the free tier covers 10 GB storage + 1 GB/day egress, uploads are
+// free, private buckets are the default, and commercial use is allowed -
+// unlike Vercel Blob Hobby (non-commercial only) and Firebase Storage
+// (requires the paid Blaze plan).
+//
+// Payment proofs are never public: the bucket stays private and every read
+// goes through a short-lived presigned URL minted server-side. Writes happen
+// server-side with PutObject, so no credentials ever reach the browser.
 
-import { ENV } from "./_core/env";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
-function getForgeConfig() {
-  const forgeUrl = ENV.forgeApiUrl;
-  const forgeKey = ENV.forgeApiKey;
+const SIGNED_URL_TTL_SECONDS = 15 * 60;
 
-  if (!forgeUrl || !forgeKey) {
+export interface B2Config {
+  keyId: string;
+  applicationKey: string;
+  bucket: string;
+  endpoint: string;
+}
+
+export function getB2Config(): B2Config {
+  const keyId = process.env.B2_KEY_ID?.trim() ?? "";
+  const applicationKey = process.env.B2_APPLICATION_KEY ?? "";
+  const bucket = process.env.B2_BUCKET?.trim() ?? "";
+  const endpoint = (process.env.B2_ENDPOINT?.trim() ?? "").replace(/\/+$/, "");
+  if (!keyId || !applicationKey || !bucket || !endpoint) {
     throw new Error(
-      "Storage config missing: set BUILT_IN_FORGE_API_URL and BUILT_IN_FORGE_API_KEY",
+      "Storage config missing: set B2_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET and B2_ENDPOINT (e.g. https://s3.us-west-004.backblazeb2.com).",
     );
   }
+  return { keyId, applicationKey, bucket, endpoint };
+}
 
-  return { forgeUrl: forgeUrl.replace(/\/+$/, ""), forgeKey };
+let client: S3Client | null = null;
+
+function getS3Client(): S3Client {
+  if (client) return client;
+  const config = getB2Config();
+  client = new S3Client({
+    region: "us-west-004",
+    endpoint: config.endpoint,
+    credentials: {
+      accessKeyId: config.keyId,
+      secretAccessKey: config.applicationKey,
+    },
+    // B2's S3-compatible endpoint needs path-style addressing.
+    forcePathStyle: true,
+  });
+  return client;
 }
 
 function normalizeKey(relKey: string): string {
@@ -28,70 +63,48 @@ function appendHashSuffix(relKey: string): string {
   return `${relKey.slice(0, lastDot)}_${hash}${relKey.slice(lastDot)}`;
 }
 
+function toBody(data: Buffer | Uint8Array | string): Uint8Array {
+  if (typeof data === "string") return new TextEncoder().encode(data);
+  return data instanceof Uint8Array ? data : new Uint8Array(data);
+}
+
+/** Store a file in the private B2 bucket. Returns the storage key. */
 export async function storagePut(
   relKey: string,
   data: Buffer | Uint8Array | string,
   contentType = "application/octet-stream",
 ): Promise<{ key: string; url: string }> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
+  const config = getB2Config();
   const key = appendHashSuffix(normalizeKey(relKey));
 
-  // 1. Get presigned PUT URL from Forge
-  const presignUrl = new URL("v1/storage/presign/put", forgeUrl + "/");
-  presignUrl.searchParams.set("path", key);
+  await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: key,
+      Body: toBody(data),
+      ContentType: contentType,
+    }),
+  );
 
-  const presignResp = await fetch(presignUrl, {
-    headers: { Authorization: `Bearer ${forgeKey}` },
-  });
-
-  if (!presignResp.ok) {
-    const msg = await presignResp.text().catch(() => presignResp.statusText);
-    throw new Error(`Storage presign failed (${presignResp.status}): ${msg}`);
-  }
-
-  const { url: s3Url } = (await presignResp.json()) as { url: string };
-  if (!s3Url) throw new Error("Forge returned empty presign URL");
-
-  // 2. PUT file directly to S3
-  const blob =
-    typeof data === "string"
-      ? new Blob([data], { type: contentType })
-      : new Blob([data as any], { type: contentType });
-
-  const uploadResp = await fetch(s3Url, {
-    method: "PUT",
-    headers: { "Content-Type": contentType },
-    body: blob,
-  });
-
-  if (!uploadResp.ok) {
-    throw new Error(`Storage upload to S3 failed (${uploadResp.status})`);
-  }
-
-  return { key, url: `/manus-storage/${key}` };
+  return { key, url: `/storage/${encodeURIComponent(key)}` };
 }
 
+/** Reference an already-stored file via the internal proxy path. */
 export async function storageGet(relKey: string): Promise<{ key: string; url: string }> {
   const key = normalizeKey(relKey);
-  return { key, url: `/manus-storage/${key}` };
+  return { key, url: `/storage/${encodeURIComponent(key)}` };
 }
 
+/**
+ * Mint a short-lived presigned GET URL for a private object. Used for
+ * owner/admin-only downloads such as payment proof screenshots.
+ */
 export async function storageGetSignedUrl(relKey: string): Promise<string> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
+  const config = getB2Config();
   const key = normalizeKey(relKey);
-
-  const getUrl = new URL("v1/storage/presign/get", forgeUrl + "/");
-  getUrl.searchParams.set("path", key);
-
-  const resp = await fetch(getUrl, {
-    headers: { Authorization: `Bearer ${forgeKey}` },
-  });
-
-  if (!resp.ok) {
-    const msg = await resp.text().catch(() => resp.statusText);
-    throw new Error(`Storage signed URL failed (${resp.status}): ${msg}`);
-  }
-
-  const { url } = (await resp.json()) as { url: string };
-  return url;
+  return getSignedUrl(
+    getS3Client(),
+    new GetObjectCommand({ Bucket: config.bucket, Key: key }),
+    { expiresIn: SIGNED_URL_TTL_SECONDS },
+  );
 }
