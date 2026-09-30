@@ -32,7 +32,7 @@ export interface B2Config {
 
 export function getB2Config(): B2Config {
   const keyId = process.env.B2_KEY_ID?.trim() ?? "";
-  const applicationKey = process.env.B2_APPLICATION_KEY ?? "";
+  const applicationKey = process.env.B2_APPLICATION_KEY?.trim() ?? "";
   const bucket = process.env.B2_BUCKET?.trim() ?? "";
   const endpoint = (process.env.B2_ENDPOINT?.trim() ?? "").replace(/\/+$/, "");
   if (!keyId || !applicationKey || !bucket || !endpoint) {
