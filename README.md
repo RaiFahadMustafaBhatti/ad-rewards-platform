@@ -67,7 +67,9 @@ Setup (one time):
 
 ## Deploying on Vercel
 
-The repo is Vercel-ready (`vercel.json` + `api/index.ts` serverless entrypoint).
+The repo is Vercel-ready (`vercel.json` + `api-src/index.ts` serverless entrypoint,
+pre-bundled by `pnpm build:api` into `api/index.js` — Vercel's TS processing can't
+resolve the local `../server` imports, so the bundled file is what gets deployed).
 All persistent state lives outside the function: Firestore for data and
 Backblaze B2 for files.
 

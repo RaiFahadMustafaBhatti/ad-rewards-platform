@@ -26,7 +26,7 @@ async function startServer() {
   const server = createServer(app);
 
   // development mode uses Vite, production mode uses static files.
-  // Dynamically imported so the Vercel serverless bundle (api/index.ts,
+  // Dynamically imported so the Vercel serverless bundle (api-src/index.ts,
   // which imports ./app only) never pulls in the Vite toolchain.
   if (process.env.NODE_ENV === "development") {
     const { setupVite } = await import("./vite");

@@ -1,7 +1,7 @@
 import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
-import { getFirebaseAuth } from "../firebase";
+import { isFirebaseConfigured, verifyFirebaseIdToken } from "../firebase";
 import { getSessionCookieOptions } from "./cookies";
 import { createSessionToken } from "./session";
 
@@ -21,24 +21,23 @@ export function registerFirebaseAuthRoutes(app: Express) {
       return;
     }
 
-    const auth = getFirebaseAuth();
-    if (!auth) {
+    if (!isFirebaseConfigured()) {
       res.status(503).json({ error: "Member sign-in is not configured yet. Please try again later." });
       return;
     }
 
     try {
-      const decoded = await auth.verifyIdToken(idToken);
-      if (!decoded.uid) {
+      const verified = await verifyFirebaseIdToken(idToken);
+      if (!verified) {
         res.status(401).json({ error: "The sign-in token is invalid." });
         return;
       }
 
-      const openId = `firebase:${decoded.uid}`;
+      const openId = `firebase:${verified.uid}`;
       await db.upsertUser({
         openId,
-        name: typeof decoded.name === "string" ? decoded.name : null,
-        email: typeof decoded.email === "string" ? decoded.email : null,
+        name: verified.name ?? null,
+        email: verified.email ?? null,
         loginMethod: "firebase_google",
         lastSignedIn: new Date(),
       });

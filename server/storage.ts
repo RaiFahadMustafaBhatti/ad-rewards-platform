@@ -8,9 +8,18 @@
 // Payment proofs are never public: the bucket stays private and every read
 // goes through a short-lived presigned URL minted server-side. Writes happen
 // server-side with PutObject, so no credentials ever reach the browser.
+//
+// NOTE: this module uses the tiny `aws4` SigV4 signer + global fetch instead
+// of the AWS SDK. The SDK was dropped during the Vercel investigation because
+// it was a suspect, but the confirmed function crashers were different: (1)
+// Vercel's TS processing not resolving the local ../server imports (fixed by
+// pre-bundling api-src/index.ts -> api/index.js with esbuild), and (2) the
+// firebase-admin/auth + jwks-rsa + CJS require("jose") conflict against the
+// ESM-only jose package (fixed by verifying Firebase ID tokens with jose
+// directly). The aws4 rewrite stays because it keeps the serverless bundle
+// small and dependency-free.
 
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import aws4 from "aws4";
 
 const SIGNED_URL_TTL_SECONDS = 15 * 60;
 
@@ -34,8 +43,6 @@ export function getB2Config(): B2Config {
   return { keyId, applicationKey, bucket, endpoint };
 }
 
-let client: S3Client | null = null;
-
 /**
  * B2's S3-compatible API signs requests with SigV4, which needs the region
  * matching the endpoint (e.g. https://s3.us-west-004.backblazeb2.com ->
@@ -48,22 +55,6 @@ function resolveRegion(endpoint: string): string {
   const match = endpoint.match(/^https?:\/\/s3\.([^.]+)\.backblazeb2\.com/i);
   if (match) return match[1];
   return "us-east-005";
-}
-
-function getS3Client(): S3Client {
-  if (client) return client;
-  const config = getB2Config();
-  client = new S3Client({
-    region: resolveRegion(config.endpoint),
-    endpoint: config.endpoint,
-    credentials: {
-      accessKeyId: config.keyId,
-      secretAccessKey: config.applicationKey,
-    },
-    // B2's S3-compatible endpoint needs path-style addressing.
-    forcePathStyle: true,
-  });
-  return client;
 }
 
 function normalizeKey(relKey: string): string {
@@ -82,6 +73,11 @@ function toBody(data: Buffer | Uint8Array | string): Uint8Array {
   return data instanceof Uint8Array ? data : new Uint8Array(data);
 }
 
+function endpointParts(config: B2Config): { host: string; region: string } {
+  const url = new URL(config.endpoint);
+  return { host: url.host, region: resolveRegion(config.endpoint) };
+}
+
 /** Store a file in the private B2 bucket. Returns the storage key. */
 export async function storagePut(
   relKey: string,
@@ -89,16 +85,35 @@ export async function storagePut(
   contentType = "application/octet-stream",
 ): Promise<{ key: string; url: string }> {
   const config = getB2Config();
+  const { host, region } = endpointParts(config);
   const key = appendHashSuffix(normalizeKey(relKey));
+  const body = toBody(data);
 
-  await getS3Client().send(
-    new PutObjectCommand({
-      Bucket: config.bucket,
-      Key: key,
-      Body: toBody(data),
-      ContentType: contentType,
-    }),
+  const signed = aws4.sign(
+    {
+      host,
+      method: "PUT",
+      path: `/${config.bucket}/${key}`,
+      service: "s3",
+      region,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(body.length),
+      },
+      body: Buffer.from(body).toString("utf8"),
+    },
+    { accessKeyId: config.keyId, secretAccessKey: config.applicationKey },
   );
+
+  const res = await fetch(`https://${host}/${config.bucket}/${key}`, {
+    method: "PUT",
+    headers: signed.headers as Record<string, string>,
+    body: Buffer.from(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`B2 PutObject failed (${res.status}): ${text.slice(0, 300)}`);
+  }
 
   return { key, url: `/storage/${encodeURIComponent(key)}` };
 }
@@ -115,10 +130,19 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
  */
 export async function storageGetSignedUrl(relKey: string): Promise<string> {
   const config = getB2Config();
+  const { host, region } = endpointParts(config);
   const key = normalizeKey(relKey);
-  return getSignedUrl(
-    getS3Client(),
-    new GetObjectCommand({ Bucket: config.bucket, Key: key }),
-    { expiresIn: SIGNED_URL_TTL_SECONDS },
+
+  const presigned = aws4.sign(
+    {
+      host,
+      method: "GET",
+      path: `/${config.bucket}/${key}?X-Amz-Expires=${SIGNED_URL_TTL_SECONDS}`,
+      service: "s3",
+      region,
+      signQuery: true,
+    },
+    { accessKeyId: config.keyId, secretAccessKey: config.applicationKey },
   );
+  return `https://${presigned.host}${presigned.path}`;
 }

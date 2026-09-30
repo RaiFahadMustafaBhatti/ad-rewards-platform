@@ -151,14 +151,84 @@ async function getDoc(db: Firestore, collection: string, id: number | string): P
 }
 
 /** Per-collection numeric ID counters, advanced inside transactions. */
-async function nextId(tx: Transaction, db: Firestore, collection: string): Promise<number> {
+// ---------------------------------------------------------------------------
+// Transaction helpers (Firestore-safe)
+//
+// Firestore transactions require ALL reads to happen before ALL writes.
+// To honor that, ID allocation and unique-claim checks are split into a
+// read phase and a write phase:
+//
+//   read phase:  tx.get(...) / readCounters(...) / peekUniqueClaim(...)
+//   compute:     allocId(...) / pure checks
+//   write phase: writeCounters(...) / tx.set/update/delete / applyUniqueClaim(...)
+//                / releaseUnique(...)
+//
+// Never call a read-phase helper after a write-phase operation.
+// ---------------------------------------------------------------------------
+
+interface CounterState {
+  ref: DocumentReference;
+  counts: Record<string, number>;
+}
+
+/** Read phase: fetch the shared counters document once per transaction. */
+async function readCounters(tx: Transaction, db: Firestore): Promise<CounterState> {
   const ref = db.collection("meta").doc("counters");
   const snap = await tx.get(ref);
-  const counters = (snap.exists ? snap.data() : null) as Row | null;
-  const current = Number(counters?.[collection] ?? 0);
-  const next = current + 1;
-  tx.set(ref, { [collection]: next }, { merge: true });
+  const data = (snap.exists ? snap.data() : null) as Row | null;
+  const counts: Record<string, number> = {};
+  if (data) {
+    for (const [key, value] of Object.entries(data)) counts[key] = Number(value ?? 0);
+  }
+  return { ref, counts };
+}
+
+/** Compute phase (pure): allocate the next numeric ID for a collection. */
+function allocId(counters: CounterState, collection: string): number {
+  const next = (counters.counts[collection] ?? 0) + 1;
+  counters.counts[collection] = next;
   return next;
+}
+
+/** Write phase: persist allocated counter values. */
+function writeCounters(tx: Transaction, counters: CounterState): void {
+  tx.set(counters.ref, { ...counters.counts }, { merge: true });
+}
+
+interface UniqueClaimPeek {
+  ref: DocumentReference;
+  snap: DocumentSnapshot;
+}
+
+/** Read phase: fetch a uniqueness-claim document. */
+async function peekUniqueClaim(
+  tx: Transaction,
+  db: Firestore,
+  key: string,
+): Promise<UniqueClaimPeek> {
+  const ref = db.collection("unique").doc(key);
+  const snap = await tx.get(ref);
+  return { ref, snap };
+}
+
+/**
+ * Write phase: claim a uniqueness key for an owner record, using a snapshot
+ * fetched with peekUniqueClaim during the read phase. When the key already
+ * exists for a different owner, throws conflictMessage instead of creating
+ * a duplicate. Re-claiming by the same owner is idempotent (no write).
+ */
+function applyUniqueClaim(
+  tx: Transaction,
+  claim: UniqueClaimPeek,
+  ownerId: number,
+  conflictMessage: string,
+): void {
+  if (claim.snap.exists) {
+    const owner = Number((claim.snap.data() as Row)?.ownerId);
+    if (owner !== ownerId) throw new Error(conflictMessage);
+    return;
+  }
+  tx.set(claim.ref, { ownerId, claimedAt: new Date() });
 }
 
 /** Unique-claim key (slashes are not allowed in document IDs). */
@@ -166,26 +236,7 @@ function ukey(...parts: string[]): string {
   return parts.map((part) => part.replace(/\//g, "_")).join("_");
 }
 
-/**
- * Claim a uniqueness key for an owner record. When the key already exists for
- * a different owner, throws conflictMessage instead of creating a duplicate.
- */
-async function claimUnique(
-  tx: Transaction,
-  db: Firestore,
-  key: string,
-  ownerId: number,
-  conflictMessage: string,
-): Promise<void> {
-  const ref = db.collection("unique").doc(key);
-  const snap = await tx.get(ref);
-  if (snap.exists) {
-    const owner = Number((snap.data() as Row)?.ownerId);
-    if (owner !== ownerId) throw new Error(conflictMessage);
-    return;
-  }
-  tx.set(ref, { ownerId, claimedAt: new Date() });
-}
+/** Write phase: release a uniqueness key (delete is a write-only operation). */
 
 async function releaseUnique(tx: Transaction, db: Firestore, key: string): Promise<void> {
   tx.delete(db.collection("unique").doc(key));
@@ -404,12 +455,32 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   }
 
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
     const existing = await tx.get(db.collection("users").where("openId", "==", user.openId).limit(1));
+    const counters = await readCounters(tx, db);
+    const email =
+      typeof values.email === "string" && values.email.trim() ? values.email.trim().toLowerCase() : null;
+    const openidClaim = await peekUniqueClaim(tx, db, ukey("user", "openid", user.openId));
+    const emailClaim = email ? await peekUniqueClaim(tx, db, ukey("user", "email", email)) : null;
+    const prev = existing.empty ? null : (rowFromSnap(existing.docs[0]) as Row);
+    const prevEmail = prev && typeof prev.email === "string" ? prev.email : null;
+    let nextEmail: string | null | undefined;
+    if (!existing.empty && updateSet.email !== undefined) {
+      nextEmail =
+        typeof updateSet.email === "string" && updateSet.email.trim()
+          ? updateSet.email.trim().toLowerCase()
+          : null;
+    }
+    const nextEmailClaim =
+      nextEmail !== undefined && nextEmail && nextEmail !== prevEmail
+        ? await peekUniqueClaim(tx, db, ukey("user", "email", nextEmail))
+        : null;
+    // ---- compute phase (pure) ----
     const now = new Date();
+    const id = existing.empty ? allocId(counters, "users") : Number(existing.docs[0].id);
+    // ---- write phase ----
+    writeCounters(tx, counters);
     if (existing.empty) {
-      const id = await nextId(tx, db, "users");
-      const email =
-        typeof values.email === "string" && values.email.trim() ? values.email.trim().toLowerCase() : null;
       tx.set(
         docRef(db, "users", id),
         toStore({
@@ -423,24 +494,17 @@ export async function upsertUser(user: InsertUser): Promise<void> {
           updatedAt: now,
         }),
       );
-      await claimUnique(tx, db, ukey("user", "openid", user.openId), id, "An account with this login already exists.");
-      if (email) {
-        await claimUnique(tx, db, ukey("user", "email", email), id, "An account with this email already exists.");
+      applyUniqueClaim(tx, openidClaim, id, "An account with this login already exists.");
+      if (email && emailClaim) {
+        applyUniqueClaim(tx, emailClaim, id, "An account with this email already exists.");
       }
     } else {
       const doc = existing.docs[0];
-      const id = Number(doc.id);
-      const prev = rowFromSnap(doc) as Row;
-      if (updateSet.email !== undefined) {
-        const nextEmail =
-          typeof updateSet.email === "string" && updateSet.email.trim()
-            ? updateSet.email.trim().toLowerCase()
-            : null;
-        const prevEmail = typeof prev.email === "string" ? prev.email : null;
+      if (nextEmail !== undefined) {
         if (nextEmail !== prevEmail) {
-          if (prevEmail) await releaseUnique(tx, db, ukey("user", "email", prevEmail));
-          if (nextEmail) {
-            await claimUnique(tx, db, ukey("user", "email", nextEmail), id, "An account with this email already exists.");
+          if (prevEmail) releaseUnique(tx, db, ukey("user", "email", prevEmail));
+          if (nextEmail && nextEmailClaim) {
+            applyUniqueClaim(tx, nextEmailClaim, id, "An account with this email already exists.");
           }
         }
         updateSet.email = nextEmail;
@@ -500,11 +564,17 @@ export async function updateUserAccountStatus(input: {
   if (!target) throw new Error("The member record was not found.");
   if (target.role === "admin") throw new Error("Administrator account status cannot be changed here.");
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    const notificationId = allocId(counters, "notifications");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "users", input.userId), {
       accountStatus: input.accountStatus,
       updatedAt: new Date(),
     });
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -519,7 +589,6 @@ export async function updateUserAccountStatus(input: {
         createdAt: new Date(),
       } satisfies AuditLog),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -544,46 +613,54 @@ export async function ensureInitialPlatformData() {
   const db = await getDb();
   if (!db) return;
   await db.runTransaction(async (tx) => {
+    // ---- read phase: collect everything missing before any write ----
+    const missingPackages: Array<(typeof INITIAL_PACKAGES)[number]> = [];
     for (const item of INITIAL_PACKAGES) {
       const existing = await tx.get(db.collection("packages").where("name", "==", item.name).limit(1));
-      if (existing.empty) {
-        const id = await nextId(tx, db, "packages");
-        const now = new Date();
-        tx.set(
-          docRef(db, "packages", id),
-          toStore({
-            id,
-            name: item.name,
-            pricePaisa: item.pricePaisa,
-            rewardPerEligibleAdPaisa: item.rewardPerEligibleAdPaisa,
-            dailyAdLimit: item.dailyAdLimit,
-            durationDays: item.durationDays,
-            features: [...item.features],
-            status: "active",
-            createdAt: now,
-            updatedAt: now,
-          }),
-        );
-      }
+      if (existing.empty) missingPackages.push(item);
     }
+    const missingSettings: Array<[string, string]> = [];
     for (const [settingKey, settingValue] of Object.entries(INITIAL_PLATFORM_SETTINGS)) {
       const existing = await tx.get(db.collection("platformSettings").where("settingKey", "==", settingKey).limit(1));
-      if (existing.empty) {
-        const id = await nextId(tx, db, "platformSettings");
-        const now = new Date();
-        tx.set(
-          docRef(db, "platformSettings", id),
-          toStore({
-            id,
-            settingKey,
-            settingValue,
-            isSensitive: false,
-            updatedByUserId: null,
-            updatedAt: now,
-          }),
-        );
-      }
+      if (existing.empty) missingSettings.push([settingKey, settingValue]);
     }
+    const counters = await readCounters(tx, db);
+    // ---- write phase (counter doc persisted last, after all allocations) ----
+    for (const item of missingPackages) {
+      const id = allocId(counters, "packages");
+      const now = new Date();
+      tx.set(
+        docRef(db, "packages", id),
+        toStore({
+          id,
+          name: item.name,
+          pricePaisa: item.pricePaisa,
+          rewardPerEligibleAdPaisa: item.rewardPerEligibleAdPaisa,
+          dailyAdLimit: item.dailyAdLimit,
+          durationDays: item.durationDays,
+          features: [...item.features],
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    }
+    for (const [settingKey, settingValue] of missingSettings) {
+      const id = allocId(counters, "platformSettings");
+      const now = new Date();
+      tx.set(
+        docRef(db, "platformSettings", id),
+        toStore({
+          id,
+          settingKey,
+          settingValue,
+          isSensitive: false,
+          updatedByUserId: null,
+          updatedAt: now,
+        }),
+      );
+    }
+    writeCounters(tx, counters);
   });
 }
 
@@ -621,11 +698,16 @@ export async function updatePackageRules(input: {
   const existing = (await getDoc(db, "packages", input.packageId)) as Package | null;
   if (!existing) throw new Error("The package record was not found.");
   const updated = await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "packages", input.packageId), toStore({
       ...buildPackageRulesUpdateValues(input),
       updatedAt: new Date(),
     }));
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -688,12 +770,17 @@ export async function updatePlatformSetting(input: {
   if (!existing) throw new Error("This setting key is not recognized.");
   const nextValue = normalizePersistentSettingValue(input.settingValue);
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "platformSettings", existing.id), {
       settingValue: nextValue,
       updatedByUserId: input.adminUserId,
       updatedAt: new Date(),
     });
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -725,10 +812,17 @@ export async function ensureWallet(userId: number) {
     if (wallet) return wallet;
   }
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
+    const walletClaim = await peekUniqueClaim(tx, db, ukey("wallet", String(userId)));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    // Non-transactional re-check: another request may have created the wallet.
     const ownerId = await uniqueOwner(db, ukey("wallet", String(userId)));
     if (ownerId != null) return;
-    const id = await nextId(tx, db, "wallets");
+    const id = allocId(counters, "wallets");
     const now = new Date();
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "wallets", id),
       toStore({
@@ -740,7 +834,7 @@ export async function ensureWallet(userId: number) {
         updatedAt: now,
       } satisfies Wallet),
     );
-    await claimUnique(tx, db, ukey("wallet", String(userId)), id, "Wallet could not be initialized.");
+    applyUniqueClaim(tx, walletClaim, id, "Wallet could not be initialized.");
   });
   const finalId = await uniqueOwner(db, ukey("wallet", String(userId)));
   const wallet = (finalId != null ? await getDoc(db, "wallets", finalId) : null) as Wallet | null;
@@ -886,8 +980,14 @@ export async function startAdSession(
   if (completedToday >= membership.package.dailyAdLimit) throw new Error("You have reached today's advertisement limit.");
   const sessionToken = randomUUID();
   const viewId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "adViews");
+    // ---- read phase: every tx.get happens before any write ----
+    const tokenClaim = await peekUniqueClaim(tx, db, ukey("adsession_token", sessionToken));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "adViews");
     const nowTs = new Date();
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "adViews", id),
       toStore({
@@ -905,7 +1005,7 @@ export async function startAdSession(
         deviceHash: security.deviceHash ?? null,
       } satisfies AdView),
     );
-    await claimUnique(tx, db, ukey("adsession_token", sessionToken), id, "Session token collision; please try again.");
+    applyUniqueClaim(tx, tokenClaim, id, "Session token collision; please try again.");
     return id;
   });
   return { sessionToken, viewId, requiredSeconds: campaign.durationSeconds };
@@ -952,9 +1052,16 @@ export async function completeAdSession(userId: number, sessionToken: string) {
       ? "complete"
       : "active";
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
     const viewSnap = await tx.get(docRef(db, "adViews", view.id));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
     if (!viewSnap.exists || (viewSnap.data() as Row).status !== "started")
       throw new Error("This advertisement session has already been resolved.");
+    const ledgerId = allocId(counters, "ledgerEntries");
+    const notificationId = allocId(counters, "notifications");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "adViews", view.id), {
       status: "completed",
       completedAt: now,
@@ -970,7 +1077,6 @@ export async function completeAdSession(userId: number, sessionToken: string) {
       lifetimeEarnedPaisa: wallet.lifetimeEarnedPaisa + campaign.rewardPaisa,
       updatedAt: now,
     });
-    const ledgerId = await nextId(tx, db, "ledgerEntries");
     tx.set(
       docRef(db, "ledgerEntries", ledgerId),
       toStore({
@@ -991,7 +1097,6 @@ export async function completeAdSession(userId: number, sessionToken: string) {
         createdAt: now,
       } satisfies LedgerEntry),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -1048,7 +1153,13 @@ export async function createCampaign(
     throw new Error("Campaign budget, limits, duration, or dates are invalid.");
   const now = new Date();
   const campaignId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "adCampaigns");
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "adCampaigns");
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "adCampaigns", id),
       toStore({
@@ -1073,7 +1184,6 @@ export async function createCampaign(
         updatedAt: now,
       }),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1129,6 +1239,12 @@ export async function updateCampaign(input: {
   if (input.budgetPaisa < existing.rewardsDistributedPaisa)
     throw new Error("Campaign budget cannot be lower than rewards already recorded.");
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(
       docRef(db, "adCampaigns", input.campaignId),
       toStore({
@@ -1149,7 +1265,6 @@ export async function updateCampaign(input: {
         updatedAt: new Date(),
       }),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1176,8 +1291,13 @@ export async function deleteCampaign(input: { adminUserId: number; campaignId: n
   if (!viewSnap.empty)
     throw new Error("Campaigns with recorded viewing activity cannot be deleted; pause them to preserve the audit trail.");
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.delete(docRef(db, "adCampaigns", input.campaignId));
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1223,15 +1343,17 @@ export async function submitPaymentProof(input: {
   const attempts = rowsFromSnaps(proofsSnap.docs).map((row) => Number(row.attemptNumber ?? 0));
   const attemptNumber = (attempts.length ? Math.max(...attempts) : 0) + 1;
   const proofId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "paymentProofs");
-    await claimUnique(
-      tx,
-      db,
-      ukey("paymentproof", "txn", input.transactionId.trim()),
-      id,
-      "This transaction ID has already been submitted.",
-    );
+    // ---- read phase: every tx.get happens before any write ----
+    const txnClaim = await peekUniqueClaim(tx, db, ukey("paymentproof", "txn", input.transactionId.trim()));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "paymentProofs");
+    const membershipId = allocId(counters, "userPackages");
+    const notificationId = allocId(counters, "notifications");
     const now = new Date();
+    // ---- write phase ----
+    writeCounters(tx, counters);
+    applyUniqueClaim(tx, txnClaim, id, "This transaction ID has already been submitted.");
     tx.set(
       docRef(db, "paymentProofs", id),
       toStore({
@@ -1256,7 +1378,6 @@ export async function submitPaymentProof(input: {
         createdAt: now,
       }),
     );
-    const membershipId = await nextId(tx, db, "userPackages");
     tx.set(
       docRef(db, "userPackages", membershipId),
       toStore({
@@ -1271,7 +1392,6 @@ export async function submitPaymentProof(input: {
         updatedAt: now,
       }),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -1364,17 +1484,23 @@ export async function reviewPaymentProof(input: {
     const rejectionReason = input.rejectionReason?.trim();
     if (!rejectionReason) throw new Error("A rejection reason is required.");
     await db.runTransaction(async (tx) => {
+      // ---- read phase: every tx.get happens before any write ----
+      const membershipSnap = await tx.get(db.collection("userPackages").where("paymentProofId", "==", payment.id));
+      const counters = await readCounters(tx, db);
+      // ---- compute phase (pure) ----
+      const notificationId = allocId(counters, "notifications");
+      const auditId = allocId(counters, "auditLogs");
+      // ---- write phase ----
+      writeCounters(tx, counters);
       tx.update(docRef(db, "paymentProofs", payment.id), {
         status: "rejected",
         rejectionReason,
         reviewedByUserId: input.adminUserId,
         reviewedAt: now,
       });
-      const membershipSnap = await tx.get(db.collection("userPackages").where("paymentProofId", "==", payment.id));
       for (const doc of membershipSnap.docs) {
         tx.update(doc.ref, { status: "cancelled", updatedAt: now });
       }
-      const notificationId = await nextId(tx, db, "notifications");
       tx.set(
         docRef(db, "notifications", notificationId),
         toStore({
@@ -1387,7 +1513,6 @@ export async function reviewPaymentProof(input: {
           createdAt: now,
         } satisfies Notification),
       );
-      const auditId = await nextId(tx, db, "auditLogs");
       tx.set(
         docRef(db, "auditLogs", auditId),
         toStore({
@@ -1407,16 +1532,23 @@ export async function reviewPaymentProof(input: {
   }
   const expiry = new Date(Date.now() + packageRow.durationDays * 24 * 60 * 60 * 1000);
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
+    const membershipSnap = await tx.get(db.collection("userPackages").where("paymentProofId", "==", payment.id));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const ledgerId = allocId(counters, "ledgerEntries");
+    const notificationId = allocId(counters, "notifications");
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "paymentProofs", payment.id), {
       status: "approved",
       reviewedByUserId: input.adminUserId,
       reviewedAt: now,
     });
-    const membershipSnap = await tx.get(db.collection("userPackages").where("paymentProofId", "==", payment.id));
     for (const doc of membershipSnap.docs) {
       tx.update(doc.ref, { status: "active", startedAt: now, expiresAt: Timestamp.fromDate(expiry), updatedAt: now });
     }
-    const ledgerId = await nextId(tx, db, "ledgerEntries");
     tx.set(
       docRef(db, "ledgerEntries", ledgerId),
       toStore({
@@ -1437,7 +1569,6 @@ export async function reviewPaymentProof(input: {
         createdAt: now,
       } satisfies LedgerEntry),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -1450,7 +1581,6 @@ export async function reviewPaymentProof(input: {
         createdAt: now,
       } satisfies Notification),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1483,8 +1613,13 @@ export async function updateMemberProfile(input: { userId: number; name: string;
   if (phone && !isValidPakistanMobile(phone)) throw new Error("Enter a valid Pakistani mobile number.");
   const user = await getUserById(input.userId);
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "users", input.userId), { name, phone, updatedAt: new Date() });
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1574,7 +1709,14 @@ export async function createWithdrawal(input: {
     throw new Error("Your available balance is insufficient for this withdrawal.");
   const now = new Date();
   const withdrawalId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "withdrawals");
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "withdrawals");
+    const ledgerId = allocId(counters, "ledgerEntries");
+    const notificationId = allocId(counters, "notifications");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "withdrawals", id),
       toStore({
@@ -1600,7 +1742,6 @@ export async function createWithdrawal(input: {
       heldBalancePaisa: wallet.heldBalancePaisa + quote.amountPaisa,
       updatedAt: now,
     });
-    const ledgerId = await nextId(tx, db, "ledgerEntries");
     tx.set(
       docRef(db, "ledgerEntries", ledgerId),
       toStore({
@@ -1621,7 +1762,6 @@ export async function createWithdrawal(input: {
         createdAt: now,
       } satisfies LedgerEntry),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -1693,9 +1833,17 @@ export async function updateWithdrawalStatus(input: {
   }
   const wallet = await ensureWallet(withdrawal.userId);
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
     const isReturn = input.status === "rejected" || input.status === "cancelled";
     const newAvailable = isReturn ? wallet.availableBalancePaisa + withdrawal.amountPaisa : wallet.availableBalancePaisa;
     const newHeld = Math.max(0, wallet.heldBalancePaisa - withdrawal.amountPaisa);
+    const ledgerId = allocId(counters, "ledgerEntries");
+    const notificationId = allocId(counters, "notifications");
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "withdrawals", withdrawal.id), {
       status: input.status,
       adminNote: input.adminNote?.trim() ?? null,
@@ -1708,7 +1856,6 @@ export async function updateWithdrawalStatus(input: {
       heldBalancePaisa: newHeld,
       updatedAt: now,
     });
-    const ledgerId = await nextId(tx, db, "ledgerEntries");
     tx.set(
       docRef(db, "ledgerEntries", ledgerId),
       toStore({
@@ -1729,7 +1876,6 @@ export async function updateWithdrawalStatus(input: {
         createdAt: now,
       } satisfies LedgerEntry),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({
@@ -1745,7 +1891,6 @@ export async function updateWithdrawalStatus(input: {
         createdAt: now,
       } satisfies Notification),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1794,7 +1939,13 @@ export async function createFraudFlag(input: {
   const db = requireDatabase(await getDb());
   const now = new Date();
   const flagId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "fraudFlags");
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "fraudFlags");
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "fraudFlags", id),
       toStore({
@@ -1810,7 +1961,6 @@ export async function createFraudFlag(input: {
         reviewedAt: null,
       }),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -1840,7 +1990,12 @@ export async function createSystemFraudFlag(input: {
 }): Promise<{ id: number }> {
   const db = requireDatabase(await getDb());
   const flagId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "fraudFlags");
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "fraudFlags");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "fraudFlags", id),
       toStore({
@@ -2160,7 +2315,13 @@ export async function createRewardVideo(input: {
   const { verificationCode, ...videoInput } = input;
   const now = new Date();
   const videoId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "rewardVideos");
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "rewardVideos");
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "rewardVideos", id),
       toStore({
@@ -2181,7 +2342,6 @@ export async function createRewardVideo(input: {
         updatedAt: now,
       }),
     );
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -2229,11 +2389,16 @@ export async function updateRewardVideo(input: {
   const packageRow = await getDoc(db, "packages", input.packageId);
   if (!packageRow) throw new Error("The selected package does not exist.");
   await db.runTransaction(async (tx) => {
+    // ---- read phase ----
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(docRef(db, "rewardVideos", input.videoId), toStore({
       ...buildRewardVideoUpdateValues(input, existing),
       updatedAt: new Date(),
     }));
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -2265,10 +2430,15 @@ export async function deleteRewardVideo(input: { adminUserId: number; videoId: n
   if (!completionSnap.empty)
     throw new Error("Videos with completed rewards cannot be deleted; disable them to preserve the audit trail.");
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
     const sessionSnap = await tx.get(db.collection("videoWatchSessions").where("videoId", "==", input.videoId));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const auditId = allocId(counters, "auditLogs");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     for (const doc of sessionSnap.docs) tx.delete(doc.ref);
     tx.delete(docRef(db, "rewardVideos", input.videoId));
-    const auditId = await nextId(tx, db, "auditLogs");
     tx.set(
       docRef(db, "auditLogs", auditId),
       toStore({
@@ -2353,8 +2523,14 @@ export async function startVideoWatchSession(
   }
   const sessionToken = randomUUID();
   const sessionId = await db.runTransaction(async (tx) => {
-    const id = await nextId(tx, db, "videoWatchSessions");
+    // ---- read phase: every tx.get happens before any write ----
+    const tokenClaim = await peekUniqueClaim(tx, db, ukey("vwsession_token", sessionToken));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
+    const id = allocId(counters, "videoWatchSessions");
     const nowTs = new Date();
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.set(
       docRef(db, "videoWatchSessions", id),
       toStore({
@@ -2383,7 +2559,7 @@ export async function startVideoWatchSession(
         deviceHash: input.deviceHash ?? null,
       } satisfies VideoWatchSession),
     );
-    await claimUnique(tx, db, ukey("vwsession_token", sessionToken), id, "Session token collision; please try again.");
+    applyUniqueClaim(tx, tokenClaim, id, "Session token collision; please try again.");
     return id;
   });
   void sessionId;
@@ -2628,23 +2804,30 @@ export async function claimVideoWatchSession(input: { userId: number; sessionTok
   const wallet = await ensureWallet(input.userId);
   const now = new Date();
   await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
     const sessionRef = docRef(db, "videoWatchSessions", session.id);
     const sessionSnap = await tx.get(sessionRef);
+    const dailyClaim = await peekUniqueClaim(
+      tx,
+      db,
+      ukey("videocompletion", String(input.userId), String(video.id), platformDay.dayKey),
+    );
+    const sessionClaim = await peekUniqueClaim(tx, db, ukey("videocompletion_session", String(session.id)));
+    const counters = await readCounters(tx, db);
+    // ---- compute phase (pure) ----
     if (!sessionSnap.exists) throw new Error("This video session is no longer available.");
     const current = rowFromSnap(sessionSnap) as VideoWatchSession | null;
     if (!current) throw new Error("This video session is no longer available.");
     if (current.status !== "code_verified" || current.verificationStatus !== "passed")
       throw new Error("This video session has already been resolved.");
+    const completionId = allocId(counters, "videoCompletions");
+    const ledgerId = allocId(counters, "ledgerEntries");
+    const notificationId = allocId(counters, "notifications");
+    // ---- write phase ----
+    writeCounters(tx, counters);
     tx.update(sessionRef, { status: "claimed", rewardStatus: "claimed", completedAt: Timestamp.fromDate(now) });
-    const completionId = await nextId(tx, db, "videoCompletions");
-    await claimUnique(
-      tx,
-      db,
-      ukey("videocompletion", String(input.userId), String(video.id), platformDay.dayKey),
-      completionId,
-      "Reward already claimed for this video today.",
-    );
-    await claimUnique(tx, db, ukey("videocompletion_session", String(session.id)), completionId, "This video session has already been resolved.");
+    applyUniqueClaim(tx, dailyClaim, completionId, "Reward already claimed for this video today.");
+    applyUniqueClaim(tx, sessionClaim, completionId, "This video session has already been resolved.");
     tx.set(
       docRef(db, "videoCompletions", completionId),
       toStore({
@@ -2661,7 +2844,6 @@ export async function claimVideoWatchSession(input: { userId: number; sessionTok
       availableBalancePaisa: wallet.availableBalancePaisa + video.rewardPaisa,
       lifetimeEarnedPaisa: wallet.lifetimeEarnedPaisa + video.rewardPaisa,
     });
-    const ledgerId = await nextId(tx, db, "ledgerEntries");
     tx.set(
       docRef(db, "ledgerEntries", ledgerId),
       toStore({
@@ -2682,7 +2864,6 @@ export async function claimVideoWatchSession(input: { userId: number; sessionTok
         createdAt: now,
       } satisfies LedgerEntry),
     );
-    const notificationId = await nextId(tx, db, "notifications");
     tx.set(
       docRef(db, "notifications", notificationId),
       toStore({

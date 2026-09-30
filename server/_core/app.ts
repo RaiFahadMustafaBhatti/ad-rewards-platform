@@ -10,7 +10,7 @@ import { createContext } from "./context";
  * Build the Express application WITHOUT binding a port or serving static
  * files. Shared by:
  *  - the long-running local/production server (server/_core/index.ts), and
- *  - the Vercel serverless entrypoint (api/index.ts).
+ *  - the Vercel serverless entrypoint (api-src/index.ts, pre-bundled to api/index.js).
  *
  * This module intentionally never imports dev-only tooling (Vite), so the
  * serverless bundle stays lean. Static files are served by Express only in

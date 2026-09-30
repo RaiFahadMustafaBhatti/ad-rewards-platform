@@ -11,8 +11,13 @@
 // same way it previously did without DATABASE_URL.
 
 import { cert, getApps, initializeApp, type App } from "firebase-admin/app";
-import { getAuth, type Auth } from "firebase-admin/auth";
 import { getFirestore as getAdminFirestore, type Firestore } from "firebase-admin/firestore";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+// NOTE: firebase-admin/auth is intentionally NOT imported here. It pulls in
+// jwks-rsa@4 (CommonJS) which does require("jose") where jose is ESM-only -
+// that crashes on runtimes whose CJS loader cannot require() ESM (Vercel).
+// ID tokens are verified with jose directly instead (see verifyFirebaseIdToken).
 
 let app: App | null = null;
 let initAttempted = false;
@@ -68,13 +73,50 @@ export function getFirestore(): Firestore | null {
   }
 }
 
-export function getFirebaseAuth(): Auth | null {
-  const firebaseApp = getFirebaseApp();
-  if (!firebaseApp) return null;
+export interface VerifiedFirebaseToken {
+  uid: string;
+  name?: string;
+  email?: string;
+  emailVerified?: boolean;
+}
+
+const SECURE_TOKEN_JWKS_URL =
+  "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
+
+let remoteJwks: ReturnType<typeof createRemoteJWKSet> | null = null;
+
+/**
+ * Verify a Firebase ID token (Google sign-in) with jose.
+ *
+ * Checks signature (Google securetoken JWKS), issuer, audience and expiry -
+ * the same core checks firebase-admin's verifyIdToken performs.
+ * Returns null when Firebase is not configured or the token is invalid.
+ */
+export async function verifyFirebaseIdToken(
+  idToken: string,
+): Promise<VerifiedFirebaseToken | null> {
+  const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
+  if (!projectId || !idToken) return null;
   try {
-    return getAuth(firebaseApp);
+    if (!remoteJwks) {
+      remoteJwks = createRemoteJWKSet(new URL(SECURE_TOKEN_JWKS_URL));
+    }
+    const { payload } = await jwtVerify(idToken, remoteJwks, {
+      issuer: `https://securetoken.google.com/${projectId}`,
+      audience: projectId,
+    });
+    if (typeof payload.sub !== "string" || !payload.sub) return null;
+    return {
+      uid: payload.sub,
+      name: typeof payload.name === "string" ? payload.name : undefined,
+      email: typeof payload.email === "string" ? payload.email : undefined,
+      emailVerified: payload.email_verified === true,
+    };
   } catch (error) {
-    console.warn("[Firebase] Auth unavailable:", error);
+    console.warn(
+      "[Firebase] ID token verification failed:",
+      error instanceof Error ? error.message : error,
+    );
     return null;
   }
 }
