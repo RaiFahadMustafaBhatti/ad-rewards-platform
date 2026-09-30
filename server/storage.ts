@@ -36,11 +36,25 @@ export function getB2Config(): B2Config {
 
 let client: S3Client | null = null;
 
+/**
+ * B2's S3-compatible API signs requests with SigV4, which needs the region
+ * matching the endpoint (e.g. https://s3.us-west-004.backblazeb2.com ->
+ * us-west-004). Derive it from B2_ENDPOINT so a bucket created in any region
+ * works; B2_REGION overrides when set explicitly.
+ */
+function resolveRegion(endpoint: string): string {
+  const override = process.env.B2_REGION?.trim();
+  if (override) return override;
+  const match = endpoint.match(/^https?:\/\/s3\.([^.]+)\.backblazeb2\.com/i);
+  if (match) return match[1];
+  return "us-east-005";
+}
+
 function getS3Client(): S3Client {
   if (client) return client;
   const config = getB2Config();
   client = new S3Client({
-    region: "us-west-004",
+    region: resolveRegion(config.endpoint),
     endpoint: config.endpoint,
     credentials: {
       accessKeyId: config.keyId,

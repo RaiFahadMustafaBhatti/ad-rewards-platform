@@ -77,8 +77,9 @@ Backblaze B2 for files.
 3. Set these **Environment Variables** in the Vercel project settings
    (all environments). (`VITE_*` values are baked in at build time.)
    - `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`
-     — Firebase Admin service account (download the JSON yourself from the
-     Firebase console; paste the three fields, never the file into chat).
+     — Firebase Admin service account (the three fields live in the local
+     `.env`; copy the same values into your hosting provider's environment
+     variables for production — never commit them).
    - `JWT_SECRET` — secret used to sign session cookies.
    - `B2_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`, `B2_ENDPOINT` —
      private payment-proof storage via Backblaze B2.
