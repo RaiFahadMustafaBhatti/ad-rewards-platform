@@ -11,7 +11,7 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
-    "build:api": "esbuild api-src/index.ts --bundle --platform=node --format=cjs --target=node22 --packages=external --minify --outfile=api/index.js"
+    "build:api": "esbuild api-src/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --minify --outfile=api/index.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
