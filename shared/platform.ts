@@ -37,6 +37,7 @@ export const INITIAL_PLATFORM_SETTINGS: Record<string, string> = {
   bank_information: "[YOUR BANK INFORMATION]",
   payment_account_title: "[YOUR ACCOUNT TITLE]",
   minimum_withdrawal_paisa: "200000",
+  maximum_withdrawal_paisa: "0",
   withdrawal_fee_paisa: "15000",
   referrals_enabled: "false",
   referral_reward_paisa: "0",

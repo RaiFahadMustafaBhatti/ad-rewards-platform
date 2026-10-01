@@ -16,6 +16,7 @@ export function calculateWithdrawalQuote(
   amountPaisa: number,
   minimumWithdrawalPaisa: number,
   feePaisa: number,
+  maximumWithdrawalPaisa = 0,
 ): WithdrawalQuote {
   if (!Number.isInteger(amountPaisa) || amountPaisa <= 0) {
     throw new Error("Enter a valid withdrawal amount.");
@@ -26,8 +27,14 @@ export function calculateWithdrawalQuote(
   if (!Number.isInteger(feePaisa) || feePaisa < 0) {
     throw new Error("The withdrawal fee setting is invalid.");
   }
+  if (!Number.isInteger(maximumWithdrawalPaisa) || maximumWithdrawalPaisa < 0) {
+    throw new Error("The maximum withdrawal setting is invalid.");
+  }
   if (amountPaisa < minimumWithdrawalPaisa) {
     throw new Error("The requested amount is below the minimum withdrawal.");
+  }
+  if (maximumWithdrawalPaisa > 0 && amountPaisa > maximumWithdrawalPaisa) {
+    throw new Error("The requested amount is above the maximum withdrawal.");
   }
   if (amountPaisa <= feePaisa) {
     throw new Error("The requested amount must exceed the withdrawal fee.");

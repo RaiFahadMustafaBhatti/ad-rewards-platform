@@ -488,7 +488,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
           ...values,
           email,
           role: values.role ?? "user",
-          accountStatus: "active",
+          accountStatus: user.accountStatus ?? "review",
           phone: null,
           createdAt: now,
           updatedAt: now,
@@ -1703,6 +1703,7 @@ export async function createWithdrawal(input: {
     input.amountPaisa,
     Number(settings.minimum_withdrawal_paisa ?? 200_000),
     Number(settings.withdrawal_fee_paisa ?? 15_000),
+    Number(settings.maximum_withdrawal_paisa ?? 0),
   );
   const wallet = await ensureWallet(input.userId);
   if (wallet.availableBalancePaisa < quote.amountPaisa)
