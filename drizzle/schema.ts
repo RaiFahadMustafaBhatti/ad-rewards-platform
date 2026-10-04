@@ -177,6 +177,7 @@ export interface RewardVideo {
   verificationCodeHash: string | null;
   verificationCodeUpdatedAt: Date | null;
   sortOrder: number;
+  episodeNumber: number;
   status: RewardVideoStatus;
   createdByUserId: number | null;
   updatedByUserId: number | null;
@@ -234,6 +235,7 @@ export interface VideoCompletion {
   id: number;
   userId: number;
   videoId: number;
+  episodeNumber: number;
   watchSessionId: number;
   rewardPaisa: number;
   completedDay: Date;

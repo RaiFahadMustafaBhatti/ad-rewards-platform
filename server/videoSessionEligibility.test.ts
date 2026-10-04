@@ -25,4 +25,14 @@ describe("assigned video session eligibility", () => {
     await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "review" } })).rejects.toThrow("under review");
     await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "suspended" } })).rejects.toThrow("suspended");
   });
+
+  it("enforces episode sequencing through the injected workflow dependencies", async () => {
+    const created: unknown[] = [];
+    const base = { membership: { membership: { id: 31 }, package: { id: 8 } }, video: { id: 55, packageId: 8, status: "enabled" as const, requiredDurationSeconds: 45 }, sessionToken: "ep-session", createSession: (value: unknown) => { created.push(value); } };
+    const ep = { videoEpisodeNumber: 2, currentEpisodeNumber: 2, claimedAnyEpisodeToday: false };
+    await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "active" }, episode: ep })).resolves.toMatchObject({ sessionToken: "ep-session", resumed: false });
+    await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "active" }, episode: { ...ep, videoEpisodeNumber: 3 } })).rejects.toThrow("not unlocked yet");
+    await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "active" }, episode: { ...ep, claimedAnyEpisodeToday: true } })).rejects.toThrow("unlocks tomorrow");
+    await expect(startVideoWatchSession({ userId: 7, videoId: 55 }, { ...base, user: { accountStatus: "active" }, episode: { ...ep, currentEpisodeNumber: null } })).rejects.toThrow("completed all available");
+  });
 });

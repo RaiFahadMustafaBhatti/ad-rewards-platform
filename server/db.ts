@@ -359,6 +359,11 @@ export type VideoStartWorkflowDependencies = {
     status: "enabled" | "disabled";
     requiredDurationSeconds: number;
   } | null;
+  episode?: {
+    videoEpisodeNumber: number;
+    currentEpisodeNumber: number | null;
+    claimedAnyEpisodeToday: boolean;
+  };
   claimedToday?: boolean;
   externalUrl?: string;
   activeSession?: {
@@ -389,6 +394,7 @@ async function startVideoWatchSessionWithDependencies(
     ),
   });
   if (!deps.membership || !deps.video) throw new Error("This video is not available for your membership.");
+  if (deps.episode) assertEpisodeStartEligibility(deps.episode);
   if (deps.activeSession)
     return {
       sessionToken: deps.activeSession.sessionToken,
@@ -2165,10 +2171,62 @@ export async function getAdminExternalVideoAnalytics() {
 // Reward videos (external video workflow)
 // ---------------------------------------------------------------------------
 
+/**
+ * Episode sequencing (CINDERWALL daily saga).
+ * Videos with episodeNumber >= 1 form the ordered sequence; episodeNumber 0
+ * means "outside the sequence" (never shown to members, admin-visible only).
+ * A member always resumes at the lowest episode they have not completed, and
+ * may claim at most one episode per platform day.
+ */
+export function resolveCurrentEpisode(episodeNumbers: number[], completedEpisodes: number[]): number | null {
+  const done = new Set(completedEpisodes.filter((n) => Number.isInteger(n) && n >= 1));
+  const ordered = Array.from(new Set(episodeNumbers.filter((n) => Number.isInteger(n) && n >= 1))).sort((a, b) => a - b);
+  for (const ep of ordered) if (!done.has(ep)) return ep;
+  return null;
+}
+
+export function assertEpisodeStartEligibility(input: {
+  videoEpisodeNumber: number;
+  currentEpisodeNumber: number | null;
+  claimedAnyEpisodeToday: boolean;
+}) {
+  if (!Number.isInteger(input.videoEpisodeNumber) || input.videoEpisodeNumber < 1)
+    throw new Error("This video is not part of the episode sequence.");
+  if (input.claimedAnyEpisodeToday)
+    throw new Error("You have already claimed today's episode reward. The next episode unlocks tomorrow.");
+  if (input.currentEpisodeNumber == null)
+    throw new Error("You have completed all available episodes. Check back tomorrow for the next one.");
+  if (input.videoEpisodeNumber !== input.currentEpisodeNumber)
+    throw new Error("This episode is not unlocked yet. Complete the earlier episodes first.");
+}
+
+export async function getMemberEpisodeProgress(userId: number, packageId: number, completedDayValue: unknown) {
+  const db = requireDatabase(await getDb());
+  const videoSnap = await db
+    .collection("rewardVideos")
+    .where("packageId", "==", packageId)
+    .where("status", "==", "enabled")
+    .get();
+  const episodes = (rowsFromSnaps(videoSnap.docs) as RewardVideo[]).map((video) => video.episodeNumber ?? 0);
+  const historySnap = await db.collection("videoCompletions").where("userId", "==", userId).get();
+  const completedEpisodes = (rowsFromSnaps(historySnap.docs) as VideoCompletion[]).map(
+    (item) => item.episodeNumber ?? 0,
+  );
+  const todaySnap = await db
+    .collection("videoCompletions")
+    .where("userId", "==", userId)
+    .where("completedDay", "==", completedDayValue)
+    .get();
+  return {
+    currentEpisodeNumber: resolveCurrentEpisode(episodes, completedEpisodes),
+    claimedAnyEpisodeToday: !todaySnap.empty,
+  };
+}
+
 export async function getMemberRewardVideos(userId: number) {
   const db = requireDatabase(await getDb());
   const membership = await getActiveMembership(userId);
-  if (!membership) return { membership: null, videos: [] };
+  if (!membership) return { membership: null, videos: [], sequence: null };
   const platformDay = await platformDayWindow();
   const settings = await getSettingMap();
   const videoSnap = await db
@@ -2176,47 +2234,75 @@ export async function getMemberRewardVideos(userId: number) {
     .where("packageId", "==", membership.package.id)
     .where("status", "==", "enabled")
     .get();
-  const videos = (rowsFromSnaps(videoSnap.docs) as RewardVideo[]).sort((a, b) => {
-    if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
-  const completionSnap = await db
+  const allVideos = rowsFromSnaps(videoSnap.docs) as RewardVideo[];
+  // Episode sequence: only videos with episodeNumber >= 1 participate.
+  const episodes = allVideos.filter((video) => (video.episodeNumber ?? 0) >= 1);
+  // Progress is keyed by episode number (not record id) so it survives package changes.
+  const historySnap = await db.collection("videoCompletions").where("userId", "==", userId).get();
+  const history = rowsFromSnaps(historySnap.docs) as VideoCompletion[];
+  const completedEpisodes = history.map((item) => item.episodeNumber ?? 0);
+  const todaySnap = await db
     .collection("videoCompletions")
     .where("userId", "==", userId)
     .where("completedDay", "==", toStoredValue(platformDay.completedDay))
     .get();
-  const completions = rowsFromSnaps(completionSnap.docs) as VideoCompletion[];
-  const completionMap = new Map(completions.map((item) => [item.videoId, item]));
+  const todayCompletions = rowsFromSnaps(todaySnap.docs) as VideoCompletion[];
+  const claimedAnyToday = todayCompletions.length > 0;
+  const completionMap = new Map(todayCompletions.map((item) => [item.videoId, item]));
+  const currentEpisode = resolveCurrentEpisode(
+    episodes.map((video) => video.episodeNumber ?? 0),
+    completedEpisodes,
+  );
+  const episodeSet = new Set(episodes.map((video) => video.episodeNumber ?? 0).filter((n) => n >= 1));
+  const currentVideo =
+    currentEpisode == null
+      ? null
+      : (episodes
+          .filter((video) => (video.episodeNumber ?? 0) === currentEpisode)
+          .sort((a, b) => {
+            if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+            return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+          })[0] ?? null);
+  const locked = currentVideo != null && claimedAnyToday;
   const sessionSnap = await db.collection("videoWatchSessions").where("userId", "==", userId).get();
   const sessions = (rowsFromSnaps(sessionSnap.docs) as VideoWatchSession[]).sort(
     (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
   );
   const sessionMap = new Map<number, VideoWatchSession>();
   for (const session of sessions) if (!sessionMap.has(session.videoId)) sessionMap.set(session.videoId, session);
+  const toEntry = (video: RewardVideo) => ({
+    video: {
+      id: video.id,
+      packageId: video.packageId,
+      title: video.title,
+      platform: video.platform,
+      youtubeUrl: video.youtubeUrl,
+      youtubeVideoId: video.youtubeVideoId,
+      thumbnailUrl: video.thumbnailUrl,
+      description: video.description,
+      rewardPaisa: video.rewardPaisa,
+      requiredDurationSeconds: video.requiredDurationSeconds,
+      dailyRewardLimit: video.dailyRewardLimit,
+      verificationConfigured: video.verificationCodeHash != null,
+      sortOrder: video.sortOrder,
+      episodeNumber: video.episodeNumber ?? 0,
+      status: video.status,
+    },
+    completion: completionMap.get(video.id) ?? null,
+    session: sessionMap.get(video.id) ?? null,
+    locked,
+  });
   return {
     membership,
     platformDay: platformDay.dayKey,
     platformTimeZone: settings.platform_timezone || "Asia/Karachi",
-    videos: videos.map((video) => ({
-      video: {
-        id: video.id,
-        packageId: video.packageId,
-        title: video.title,
-        platform: video.platform,
-        youtubeUrl: video.youtubeUrl,
-        youtubeVideoId: video.youtubeVideoId,
-        thumbnailUrl: video.thumbnailUrl,
-        description: video.description,
-        rewardPaisa: video.rewardPaisa,
-        requiredDurationSeconds: video.requiredDurationSeconds,
-        dailyRewardLimit: video.dailyRewardLimit,
-        verificationConfigured: video.verificationCodeHash != null,
-        sortOrder: video.sortOrder,
-        status: video.status,
-      },
-      completion: completionMap.get(video.id) ?? null,
-      session: sessionMap.get(video.id) ?? null,
-    })),
+    sequence: {
+      currentEpisodeNumber: currentEpisode,
+      totalEpisodes: episodeSet.size,
+      completedCount: new Set(completedEpisodes.filter((n) => n >= 1)).size,
+      lockedUntilTomorrow: locked,
+    },
+    videos: currentVideo ? [toEntry(currentVideo)] : [],
   };
 }
 
@@ -2264,6 +2350,7 @@ export function buildRewardVideoUpdateValues(
     dailyRewardLimit: number;
     verificationCode?: string;
     sortOrder: number;
+    episodeNumber: number;
     status: "enabled" | "disabled";
   },
   existing: Pick<RewardVideo, "requiredDurationSeconds">,
@@ -2288,6 +2375,7 @@ export function buildRewardVideoUpdateValues(
         }
       : {}),
     sortOrder: input.sortOrder,
+    episodeNumber: input.episodeNumber,
     status: input.status,
     updatedByUserId: input.adminUserId,
   };
@@ -2307,6 +2395,7 @@ export async function createRewardVideo(input: {
   dailyRewardLimit?: number;
   verificationCode: string;
   sortOrder?: number;
+  episodeNumber?: number;
 }) {
   const db = requireDatabase(await getDb());
   const packageRow = await getDoc(db, "packages", input.packageId);
@@ -2333,6 +2422,7 @@ export async function createRewardVideo(input: {
         dailyRewardLimit: input.dailyRewardLimit ?? 1,
         verificationCodeHash: hashVideoVerificationCode(verificationCode),
         verificationCodeUpdatedAt: now,
+        episodeNumber: input.episodeNumber ?? 0,
         thumbnailUrl: input.thumbnailUrl?.trim() || fallbackThumbnail,
         description: input.description?.trim() || null,
         sortOrder: input.sortOrder ?? 0,
@@ -2382,6 +2472,7 @@ export async function updateRewardVideo(input: {
   dailyRewardLimit: number;
   verificationCode?: string;
   sortOrder: number;
+  episodeNumber: number;
   status: "enabled" | "disabled";
 }) {
   const db = requireDatabase(await getDb());
@@ -2462,8 +2553,8 @@ export async function startVideoWatchSession(
   input: { userId: number; videoId: number; ipHash?: string; deviceHash?: string },
   testDependencies?: VideoStartWorkflowDependencies,
 ) {
-  const db = requireDatabase(await getDb());
   if (testDependencies) return startVideoWatchSessionWithDependencies(input, testDependencies);
+  const db = requireDatabase(await getDb());
 
   const now = new Date();
   const user = await getUserById(input.userId);
@@ -2489,6 +2580,16 @@ export async function startVideoWatchSession(
       .get()
   ).docs[0] ?? null;
   if (completion) throw new Error("You have already claimed this video's reward today.");
+  const episodeProgress = await getMemberEpisodeProgress(
+    input.userId,
+    video.packageId,
+    toStoredValue(platformDay.completedDay),
+  );
+  assertEpisodeStartEligibility({
+    videoEpisodeNumber: video.episodeNumber ?? 0,
+    currentEpisodeNumber: episodeProgress.currentEpisodeNumber,
+    claimedAnyEpisodeToday: episodeProgress.claimedAnyEpisodeToday,
+  });
   const activeSnap = await db
     .collection("videoWatchSessions")
     .where("userId", "==", input.userId)
@@ -2835,6 +2936,7 @@ export async function claimVideoWatchSession(input: { userId: number; sessionTok
         id: completionId,
         userId: input.userId,
         videoId: video.id,
+        episodeNumber: video.episodeNumber ?? 0,
         watchSessionId: session.id,
         rewardPaisa: video.rewardPaisa,
         completedDay: platformDay.completedDay,
