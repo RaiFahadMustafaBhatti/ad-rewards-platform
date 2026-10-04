@@ -1650,17 +1650,18 @@ export async function updateMemberProfile(input: { userId: number; name: string;
 
 export async function getLedgerHistory(userId: number, period: "today" | "week" | "month" | "all") {
   const db = requireDatabase(await getDb());
-  let query: Query = db.collection("ledgerEntries").where("userId", "==", userId);
-  if (period !== "all") {
-    const now = new Date();
-    const since = new Date(now);
-    if (period === "today") since.setUTCHours(0, 0, 0, 0);
-    if (period === "week") since.setUTCDate(since.getUTCDate() - 7);
-    if (period === "month") since.setUTCMonth(since.getUTCMonth() - 1);
-    query = query.where("createdAt", ">=", Timestamp.fromDate(since));
-  }
-  const snap = await query.get();
-  const rows = rowsFromSnaps(snap.docs) as LedgerEntry[];
+  // NOTE: single-field userId query + in-memory date filter on purpose — the
+  // (userId, createdAt) composite index does not exist in Firestore, and the
+  // result is capped at 200 rows anyway.
+  const snap = await db.collection("ledgerEntries").where("userId", "==", userId).get();
+  const now = new Date();
+  const since = new Date(now);
+  if (period === "today") since.setUTCHours(0, 0, 0, 0);
+  if (period === "week") since.setUTCDate(since.getUTCDate() - 7);
+  if (period === "month") since.setUTCMonth(since.getUTCMonth() - 1);
+  const rows = (rowsFromSnaps(snap.docs) as LedgerEntry[]).filter(
+    (row) => period === "all" || new Date(row.createdAt).getTime() >= since.getTime(),
+  );
   rows.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   return rows.slice(0, 200);
 }
