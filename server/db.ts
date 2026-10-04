@@ -2610,9 +2610,13 @@ export async function startVideoWatchSession(
     };
   }
   const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
-  const recentStarts = await countWhere(db, "videoWatchSessions", (col) =>
-    col.where("userId", "==", input.userId).where("videoId", "==", input.videoId).where("startedAt", ">", toStoredValue(fifteenMinutesAgo)),
-  );
+  // NOTE: single-field userId query + in-memory filter on purpose — the
+  // (userId, videoId, startedAt) composite index does not exist in Firestore,
+  // and a member's own session docs are few enough to filter locally.
+  const userSessionSnap = await db.collection("videoWatchSessions").where("userId", "==", input.userId).get();
+  const recentStarts = (rowsFromSnaps(userSessionSnap.docs) as VideoWatchSession[]).filter(
+    (row) => row.videoId === input.videoId && new Date(row.startedAt).getTime() > fifteenMinutesAgo.getTime(),
+  ).length;
   if (recentStarts >= 5) {
     await createSystemFraudFlag({
       userId: input.userId,
