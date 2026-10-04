@@ -4,7 +4,7 @@ export const INITIAL_PACKAGES = [
     pricePaisa: 200_000,
     rewardPerEligibleAdPaisa: 2_000,
     dailyAdLimit: 1,
-    durationDays: 60,
+    durationDays: 120,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
   {
@@ -12,7 +12,7 @@ export const INITIAL_PACKAGES = [
     pricePaisa: 350_000,
     rewardPerEligibleAdPaisa: 3_500,
     dailyAdLimit: 1,
-    durationDays: 60,
+    durationDays: 120,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
   {
@@ -20,7 +20,7 @@ export const INITIAL_PACKAGES = [
     pricePaisa: 500_000,
     rewardPerEligibleAdPaisa: 5_000,
     dailyAdLimit: 1,
-    durationDays: 60,
+    durationDays: 120,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
 ] as const;
