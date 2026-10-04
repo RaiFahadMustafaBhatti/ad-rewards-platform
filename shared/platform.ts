@@ -3,24 +3,24 @@ export const INITIAL_PACKAGES = [
     name: "Platinum",
     pricePaisa: 200_000,
     rewardPerEligibleAdPaisa: 2_000,
-    dailyAdLimit: 20,
-    durationDays: 30,
+    dailyAdLimit: 1,
+    durationDays: 60,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
   {
     name: "Gold",
     pricePaisa: 350_000,
     rewardPerEligibleAdPaisa: 3_500,
-    dailyAdLimit: 20,
-    durationDays: 30,
+    dailyAdLimit: 1,
+    durationDays: 60,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
   {
     name: "Diamond",
     pricePaisa: 500_000,
     rewardPerEligibleAdPaisa: 5_000,
-    dailyAdLimit: 20,
-    durationDays: 30,
+    dailyAdLimit: 1,
+    durationDays: 60,
     features: ["Eligible advertising access", "Server-validated completion", "Manual withdrawal review"],
   },
 ] as const;
@@ -60,4 +60,12 @@ export function formatPkr(paisa: number) {
     currency: "PKR",
     maximumFractionDigits: 0,
   }).format(paisa / 100);
+}
+
+export function formatDurationDays(days: number) {
+  if (days % 30 === 0) {
+    const months = days / 30;
+    return `${months} month${months === 1 ? "" : "s"}`;
+  }
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
