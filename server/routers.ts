@@ -59,7 +59,7 @@ import {
   verifyMemberPasswordLogin,
 } from "./db";
 import { storagePut } from "./storage";
-import { validatePaymentScreenshot } from "./platformRules";
+import { isValidPakistanMobile, validatePaymentScreenshot } from "./platformRules";
 import { z } from "zod";
 
 const moneyPaisa = z.number().int().positive();
@@ -211,7 +211,7 @@ export const appRouter = router({
       }
     }),
     /** Member self-registration with email + password. Starts in manual review. */
-    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160), password: z.string().min(8).max(256) })).mutation(async ({ ctx, input }) => {
+    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX).") })).mutation(async ({ ctx, input }) => {
       const key = requestKey(ctx.req.headers);
       checkPasswordAuthRateLimit(key);
       try {

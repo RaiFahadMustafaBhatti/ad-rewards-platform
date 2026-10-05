@@ -446,7 +446,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   const values: Row = { openId: user.openId };
   const updateSet: Row = {};
-  (["name", "email", "loginMethod", "passwordHash"] as const).forEach((field) => {
+  (["name", "email", "loginMethod", "passwordHash", "phone"] as const).forEach((field) => {
     if (user[field] !== undefined) {
       const value = (user[field] ?? null) as string | null;
       values[field] = value;
@@ -498,7 +498,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
           email,
           role: values.role ?? "user",
           accountStatus: user.accountStatus ?? "review",
-          phone: null,
+          phone: (values.phone as string | null) ?? null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -605,12 +605,14 @@ export function isAdminEmail(email: string): boolean {
  * New accounts start in "review" status, same as Google signups — the
  * administrator manually approves them.
  */
-export async function signupMemberWithPassword(input: { name: string; email: string; password: string }) {
+export async function signupMemberWithPassword(input: { name: string; email: string; password: string; phone: string }) {
   const email = validateEmail(input.email);
   const name = input.name.trim();
   if (name.length < 2) throw new Error("Enter your full name.");
   const passwordError = validatePassword(input.password);
   if (passwordError) throw new Error(passwordError);
+  const phone = input.phone.trim();
+  if (!isValidPakistanMobile(phone)) throw new Error("Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX).");
   if (isAdminEmail(email)) throw new Error("This email is reserved for the administrator.");
   const existing = await getUserByEmailWithHash(email);
   if (existing) throw new Error("An account with this email already exists. Try signing in instead.");
@@ -620,6 +622,7 @@ export async function signupMemberWithPassword(input: { name: string; email: str
     name,
     loginMethod: "email_password",
     passwordHash: await hashPassword(input.password),
+    phone,
     role: "user",
     accountStatus: "review",
     lastSignedIn: new Date(),

@@ -22,6 +22,7 @@ export default function MemberAccess() {
   // Sign up state
   const [name, setName] = useState("");
   const [signupEmail, setSignupEmail] = useState("");
+  const [signupPhone, setSignupPhone] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
   const [signupDone, setSignupDone] = useState(false);
   // Forgot state
@@ -47,7 +48,7 @@ export default function MemberAccess() {
   const submitSignup = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      await signup.mutateAsync({ name, email: signupEmail, password: signupPassword });
+      await signup.mutateAsync({ name, email: signupEmail, password: signupPassword, phone: signupPhone });
       setSignupPassword("");
       setSignupDone(true);
     } catch (error) {
@@ -138,6 +139,7 @@ export default function MemberAccess() {
         )}
 
         {mode === "signup" && !signupDone && (
+          <>
           <form onSubmit={submitSignup} className="mt-7 grid gap-4">
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Full name
@@ -148,19 +150,34 @@ export default function MemberAccess() {
               <input required type="email" autoComplete="email" value={signupEmail} onChange={e => setSignupEmail(e.target.value)} className={inputClass} placeholder="you@example.com" />
             </label>
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
+              Mobile number
+              <input required type="tel" autoComplete="tel" value={signupPhone} onChange={e => setSignupPhone(e.target.value)} className={inputClass} placeholder="03XXXXXXXXX" />
+            </label>
+            <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Password
               <input required type="password" autoComplete="new-password" minLength={8} value={signupPassword} onChange={e => setSignupPassword(e.target.value)} className={inputClass} placeholder="At least 8 characters" />
             </label>
             <Button disabled={signup.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
               {signup.isPending ? <Loader2 className="animate-spin" size={17} /> : <><UserPlus className="mr-2" size={17} />Create account</>}
             </Button>
-            <p className="text-center text-sm text-slate-600">
-              Already have an account?{" "}
-              <button type="button" onClick={() => switchMode("signin")} className="font-bold text-[#13897f] hover:underline">
-                Sign in
-              </button>
-            </p>
           </form>
+          <div className="my-5 flex items-center gap-3 text-xs font-bold uppercase tracking-wider text-slate-400">
+            <span className="h-px flex-1 bg-slate-200" /> or <span className="h-px flex-1 bg-slate-200" />
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => startLogin(returnTo).catch((error: unknown) => { console.error("[Login] Google sign-in failed", error); alert(error instanceof Error ? error.message : "Sign-in failed. Please try again."); })}
+            className="h-11 w-full rounded-xl border-slate-300 font-bold"
+          >
+            Continue with Google
+          </Button>
+          <p className="mt-6 text-center text-sm text-slate-600">
+            Already have an account?{" "}
+            <button onClick={() => switchMode("signin")} className="font-bold text-[#13897f] hover:underline">
+              Sign in
+            </button>
+          </p>
+          </>
         )}
 
         {mode === "signup" && signupDone && (

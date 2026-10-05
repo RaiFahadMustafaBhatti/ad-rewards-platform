@@ -119,7 +119,7 @@ describe("auth.passwordSignup", () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "new-pass-123" }),
+      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "new-pass-123", phone: "03001234567" }),
     ).resolves.toEqual({ status: "review" });
   });
 
@@ -127,7 +127,16 @@ describe("auth.passwordSignup", () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "short" }),
+      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "short", phone: "03001234567" }),
+    ).rejects.toThrow();
+    expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid phone number at the boundary", async () => {
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "new-pass-123", phone: "123" }),
     ).rejects.toThrow();
     expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
   });
