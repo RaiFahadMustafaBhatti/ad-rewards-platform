@@ -615,21 +615,35 @@ export async function updateUserAccountStatus(input: {
 // Packages & platform settings
 // ---------------------------------------------------------------------------
 
+let initialPlatformDataEnsured = false;
+
 export async function ensureInitialPlatformData() {
+  // Seed-once guard: the original code ran this ~30-read transaction on EVERY
+  // request (via getSettingMap), adding ~10s per API call from regions far
+  // from the Firestore location. The seed is idempotent; one check per
+  // function instance is enough.
+  if (initialPlatformDataEnsured) return;
   const db = await getDb();
   if (!db) return;
   await db.runTransaction(async (tx) => {
-    // ---- read phase: collect everything missing before any write ----
-    const missingPackages: Array<(typeof INITIAL_PACKAGES)[number]> = [];
-    for (const item of INITIAL_PACKAGES) {
-      const existing = await tx.get(db.collection("packages").where("name", "==", item.name).limit(1));
-      if (existing.empty) missingPackages.push(item);
-    }
-    const missingSettings: Array<[string, string]> = [];
-    for (const [settingKey, settingValue] of Object.entries(INITIAL_PLATFORM_SETTINGS)) {
-      const existing = await tx.get(db.collection("platformSettings").where("settingKey", "==", settingKey).limit(1));
-      if (existing.empty) missingSettings.push([settingKey, settingValue]);
-    }
+    // ---- read phase: every tx.get happens before any write ----
+    // Independent reads run concurrently (Promise.all) - all reads still
+    // complete before the write phase, satisfying transaction rules.
+    const packageChecks = await Promise.all(
+      INITIAL_PACKAGES.map(async (item) => {
+        const existing = await tx.get(db.collection("packages").where("name", "==", item.name).limit(1));
+        return existing.empty ? item : null;
+      }),
+    );
+    const missingPackages = packageChecks.filter((item): item is (typeof INITIAL_PACKAGES)[number] => item !== null);
+    const settingEntries = Object.entries(INITIAL_PLATFORM_SETTINGS);
+    const settingChecks = await Promise.all(
+      settingEntries.map(async ([settingKey, settingValue]) => {
+        const existing = await tx.get(db.collection("platformSettings").where("settingKey", "==", settingKey).limit(1));
+        return existing.empty ? ([settingKey, settingValue] as [string, string]) : null;
+      }),
+    );
+    const missingSettings = settingChecks.filter((entry): entry is [string, string] => entry !== null);
     const counters = await readCounters(tx, db);
     // ---- write phase (counter doc persisted last, after all allocations) ----
     for (const item of missingPackages) {
@@ -668,6 +682,7 @@ export async function ensureInitialPlatformData() {
     }
     writeCounters(tx, counters);
   });
+  initialPlatformDataEnsured = true;
 }
 
 export async function getPublicPackages() {
@@ -878,33 +893,45 @@ export async function getActiveMembership(userId: number) {
 
 export async function getDashboardOverview(userId: number) {
   const db = requireDatabase(await getDb());
-  const user = await getUserById(userId);
-  const wallet = await ensureWallet(userId);
-  const membership = await getActiveMembership(userId);
-  const platformDay = await platformDayWindow();
+  // Independent reads run concurrently: the original sequential awaits added
+  // seconds of latency per dashboard load from regions far from Firestore.
+  const [user, wallet, membership, platformDay, settings] = await Promise.all([
+    getUserById(userId),
+    ensureWallet(userId),
+    getActiveMembership(userId),
+    platformDayWindow(),
+    getSettingMap(),
+  ]);
   const todayStart = Timestamp.fromDate(platformDay.start);
-  const todayEarningsPaisa =
-    (await sumWhere(db, "ledgerEntries", "amountPaisa", (col) =>
+  const [
+    todayEarningsPaisa,
+    todayViews,
+    todayVideoRewards,
+    pendingWithdrawalsPaisa,
+    ledgerSnap,
+    notificationSnap,
+  ] = await Promise.all([
+    sumWhere(db, "ledgerEntries", "amountPaisa", (col) =>
       col
         .where("userId", "==", userId)
         .where("direction", "==", "credit")
         .where("createdAt", ">=", todayStart),
-    )) ?? 0;
-  const todayViews = await countWhere(db, "adViews", (col) =>
-    col.where("userId", "==", userId).where("status", "==", "completed").where("completedAt", ">=", todayStart),
-  );
-  const todayVideoRewards = await countWhere(db, "videoCompletions", (col) =>
-    col.where("userId", "==", userId).where("completedDay", "==", toStoredValue(platformDay.completedDay)),
-  );
-  const settings = await getSettingMap();
-  const pendingWithdrawalsPaisa = await sumWhere(db, "withdrawals", "amountPaisa", (col) =>
-    col.where("userId", "==", userId).where("status", "in", ["pending", "processing"]),
-  );
-  const ledgerSnap = await db.collection("ledgerEntries").where("userId", "==", userId).limit(200).get();
+    ) ?? 0,
+    countWhere(db, "adViews", (col) =>
+      col.where("userId", "==", userId).where("status", "==", "completed").where("completedAt", ">=", todayStart),
+    ),
+    countWhere(db, "videoCompletions", (col) =>
+      col.where("userId", "==", userId).where("completedDay", "==", toStoredValue(platformDay.completedDay)),
+    ),
+    sumWhere(db, "withdrawals", "amountPaisa", (col) =>
+      col.where("userId", "==", userId).where("status", "in", ["pending", "processing"]),
+    ) ?? 0,
+    db.collection("ledgerEntries").where("userId", "==", userId).limit(200).get(),
+    db.collection("notifications").where("userId", "==", userId).limit(200).get(),
+  ]);
   const recentLedger = (rowsFromSnaps(ledgerSnap.docs) as LedgerEntry[])
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 20);
-  const notificationSnap = await db.collection("notifications").where("userId", "==", userId).limit(200).get();
   const recentNotifications = (rowsFromSnaps(notificationSnap.docs) as Notification[])
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 20);
