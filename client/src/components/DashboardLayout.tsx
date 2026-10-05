@@ -65,8 +65,8 @@ export default function DashboardLayout({
   });
   const { loading, user } = useAuth();
   const [location, setLocation] = useLocation();
-  const accessPath = location.startsWith("/admin") ? "/admin-access" : "/member-access";
-  const accessLabel = location.startsWith("/admin") ? "Administrator access" : "Member sign in";
+  const accessPath = "/member-access";
+  const accessLabel = "Sign in";
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, sidebarWidth.toString());
