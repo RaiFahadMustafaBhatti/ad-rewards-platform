@@ -1,10 +1,11 @@
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { createSessionToken } from "./_core/session";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import {
+  changeMemberPassword,
   completeAdSession,
   createCampaign,
   createFraudFlag,
@@ -35,9 +36,13 @@ import {
   getUserPaymentProofs,
   getUserNotifications,
   getUserWithdrawals,
+  isAdminEmail,
   listCampaigns,
   markNotificationsRead,
+  requestPasswordReset,
+  resetPasswordWithToken,
   reviewPaymentProof,
+  signupMemberWithPassword,
   startAdSession,
   startVideoWatchSession,
   submitPaymentProof,
@@ -51,6 +56,7 @@ import {
   updateUserAccountStatus,
   verifyExternalVideoCode,
   verifyExternalVideoReturn,
+  verifyMemberPasswordLogin,
 } from "./db";
 import { storagePut } from "./storage";
 import { validatePaymentScreenshot } from "./platformRules";
@@ -107,6 +113,47 @@ function recordLocalAdminFailure(key: string) {
   else localAdminAttempts.set(key, { ...current, count: current.count + 1 });
 }
 
+// Separate brute-force bucket for the unified email+password endpoints.
+const passwordAuthAttempts = new Map<string, { count: number; resetAt: number }>();
+const PASSWORD_AUTH_WINDOW_MS = 15 * 60 * 1_000;
+const PASSWORD_AUTH_MAX_ATTEMPTS = 5;
+
+function checkPasswordAuthRateLimit(key: string) {
+  const now = Date.now();
+  const current = passwordAuthAttempts.get(key);
+  if (!current || current.resetAt <= now) return;
+  if (current.count >= PASSWORD_AUTH_MAX_ATTEMPTS) throw new Error("Too many sign-in attempts. Please wait before trying again.");
+}
+
+function recordPasswordAuthFailure(key: string) {
+  const now = Date.now();
+  const current = passwordAuthAttempts.get(key);
+  if (!current || current.resetAt <= now) passwordAuthAttempts.set(key, { count: 1, resetAt: now + PASSWORD_AUTH_WINDOW_MS });
+  else passwordAuthAttempts.set(key, { ...current, count: current.count + 1 });
+}
+
+function clearPasswordAuthAttempts(key: string) {
+  passwordAuthAttempts.delete(key);
+}
+
+/** Ensure the local administrator user record exists and is active. */
+async function ensureAdminSessionUser() {
+  const configuredEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() ?? "";
+  let admin = await getUserByEmail(configuredEmail);
+  if (!admin) {
+    const openId = `local-admin:${configuredEmail}`;
+    await upsertUser({ openId, email: configuredEmail, name: "FMB Earning Hub Administrator", loginMethod: "local_admin", role: "admin", accountStatus: "active", lastSignedIn: new Date() });
+    admin = await getUserByOpenId(openId);
+  }
+  if (!admin) throw new Error("The administrator account could not be prepared.");
+  if (admin.role !== "admin" || admin.accountStatus !== "active") {
+    await upsertUser({ openId: admin.openId, role: "admin", accountStatus: "active", lastSignedIn: new Date() });
+    admin = await getUserByOpenId(admin.openId);
+  }
+  if (!admin) throw new Error("The administrator account could not be activated.");
+  return admin;
+}
+
 function secureValueMatch(value: string, expected: string) {
   const received = Buffer.from(value);
   const target = Buffer.from(expected);
@@ -128,21 +175,64 @@ export const appRouter = router({
         throw new Error("Invalid administrator credentials.");
       }
       localAdminAttempts.delete(key);
-      let admin = await getUserByEmail(configuredEmail);
-      if (!admin) {
-        const openId = `local-admin:${configuredEmail}`;
-        await upsertUser({ openId, email: configuredEmail, name: "FMB Earning Hub Administrator", loginMethod: "local_admin", role: "admin", accountStatus: "active", lastSignedIn: new Date() });
-        admin = await getUserByOpenId(openId);
-      }
-      if (!admin) throw new Error("The administrator account could not be prepared.");
-      if (admin.role !== "admin" || admin.accountStatus !== "active") {
-        await upsertUser({ openId: admin.openId, role: "admin", accountStatus: "active", lastSignedIn: new Date() });
-        admin = await getUserByOpenId(admin.openId);
-      }
-      if (!admin) throw new Error("The administrator account could not be activated.");
+      const admin = await ensureAdminSessionUser();
       const session = await createSessionToken(admin.openId, { name: admin.name ?? "FMB Earning Hub Administrator", expiresInMs: 8 * 60 * 60 * 1_000 });
       ctx.res.cookie(COOKIE_NAME, session, { ...getSessionCookieOptions(ctx.req), maxAge: 8 * 60 * 60 * 1_000 });
       return { success: true } as const;
+    }),
+    /**
+     * Unified email + password sign-in. The administrator email routes to the
+     * admin panel; every other active member routes to the member dashboard.
+     */
+    passwordLogin: publicProcedure.input(z.object({ email: z.string().trim().email().max(160), password: z.string().min(1).max(256) })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        const email = input.email.trim().toLowerCase();
+        if (isAdminEmail(email)) {
+          const configuredPassword = process.env.ADMIN_PASSWORD ?? "";
+          if (!configuredPassword || !secureValueMatch(input.password, configuredPassword)) {
+            throw new Error("Invalid email or password.");
+          }
+          const admin = await ensureAdminSessionUser();
+          const session = await createSessionToken(admin.openId, { name: admin.name ?? "FMB Earning Hub Administrator", expiresInMs: 8 * 60 * 60 * 1_000 });
+          ctx.res.cookie(COOKIE_NAME, session, { ...getSessionCookieOptions(ctx.req), maxAge: 8 * 60 * 60 * 1_000 });
+          clearPasswordAuthAttempts(key);
+          return { role: "admin" } as const;
+        }
+        const user = await verifyMemberPasswordLogin({ email, password: input.password });
+        const session = await createSessionToken(user.openId, { name: user.name ?? "", expiresInMs: ONE_YEAR_MS });
+        ctx.res.cookie(COOKIE_NAME, session, { ...getSessionCookieOptions(ctx.req), maxAge: ONE_YEAR_MS });
+        clearPasswordAuthAttempts(key);
+        return { role: "member" } as const;
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
+    }),
+    /** Member self-registration with email + password. Starts in manual review. */
+    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160), password: z.string().min(8).max(256) })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        return await signupMemberWithPassword(input);
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
+    }),
+    requestPasswordReset: publicProcedure.input(z.object({ email: z.string().trim().email().max(160) })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        return await requestPasswordReset(input.email);
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
+    }),
+    resetPassword: publicProcedure.input(z.object({ token: z.string().trim().min(16).max(128), newPassword: z.string().min(8).max(256) })).mutation(async ({ input }) => {
+      return resetPasswordWithToken({ token: input.token, newPassword: input.newPassword });
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -254,6 +344,9 @@ export const appRouter = router({
     }),
     update: protectedProcedure.input(z.object({ name: z.string().trim().min(2).max(160), phone: z.string().trim().max(20).optional() })).mutation(async ({ ctx, input }) => {
       try { return await updateMemberProfile({ ...input, userId: ctx.user.id }); } catch (error) { return toDomainError(error); }
+    }),
+    changePassword: protectedProcedure.input(z.object({ currentPassword: z.string().max(256).optional(), newPassword: z.string().min(8).max(256) })).mutation(async ({ ctx, input }) => {
+      try { return await changeMemberPassword({ userId: ctx.user.id, currentPassword: input.currentPassword, newPassword: input.newPassword }); } catch (error) { return toDomainError(error); }
     }),
   }),
   ledger: router({

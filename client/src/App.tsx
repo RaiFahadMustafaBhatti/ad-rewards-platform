@@ -8,8 +8,8 @@ import { lazy, Suspense } from "react";
 
 const Home = lazy(() => import("./pages/Home"));
 const DashboardLayout = lazy(() => import("@/components/DashboardLayout"));
-const AdminAccess = lazy(() => import("@/pages/AdminAccess"));
 const MemberAccess = lazy(() => import("@/pages/MemberAccess"));
+const ResetPassword = lazy(() => import("@/pages/ResetPassword"));
 const NotFound = lazy(() => import("@/pages/NotFound"));
 const publicPages = () => import("@/pages/PublicPages");
 const memberPages = () => import("@/pages/MemberPages");
@@ -55,7 +55,9 @@ function Router() {
       <Route path={"/disclosures"}>{() => <PolicyPage kind="disclosure" />}</Route>
       <Route path={"/contact"} component={ContactPage} />
       <Route path={"/member-access"} component={MemberAccess} />
-      <Route path={"/admin-access"} component={AdminAccess} />
+      {/* The old separate admin sign-in now opens the unified sign-in page. */}
+      <Route path={"/admin-access"} component={MemberAccess} />
+      <Route path={"/reset-password"} component={ResetPassword} />
       <Route path={"/dashboard"}>{() => <MemberRoute><MemberOverview /></MemberRoute>}</Route>
       <Route path={"/dashboard/ads"}>{() => <MemberRoute><MemberAds /></MemberRoute>}</Route>
       <Route path={"/dashboard/videos"}>{() => <MemberRoute><MemberVideos /></MemberRoute>}</Route>

@@ -34,6 +34,7 @@ import type {
   LedgerEntry,
   Notification,
   Package,
+  PasswordReset,
   PaymentProof,
   PlatformSetting,
   RewardVideo,
@@ -53,6 +54,8 @@ import {
   isValidPakistanMobile,
 } from "./platformRules";
 import { ENV } from "./_core/env";
+import { generateResetToken, hashPassword, hashResetToken, PASSWORD_RESET_TTL_MS, validatePassword, verifyPassword } from "./passwords";
+import { appBaseUrl, isMailerConfigured, sendMail } from "./mailer";
 import { storageGetSignedUrl } from "./storage";
 import { assertPendingPaymentDecision } from "./workflowGuards";
 import {
@@ -443,7 +446,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   const values: Row = { openId: user.openId };
   const updateSet: Row = {};
-  (["name", "email", "loginMethod"] as const).forEach((field) => {
+  (["name", "email", "loginMethod", "passwordHash"] as const).forEach((field) => {
     if (user[field] !== undefined) {
       const value = (user[field] ?? null) as string | null;
       values[field] = value;
@@ -521,14 +524,37 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   });
 }
 
+/** Remove the password hash before a user record leaves the server. */
+export function sanitizeUser<T extends { passwordHash?: unknown }>(user: T): Omit<T, "passwordHash"> & { passwordHash: null } {
+  const { passwordHash: _dropped, ...rest } = user;
+  return { ...rest, passwordHash: null };
+}
+
 export async function getUserByOpenId(openId: string) {
   const db = await getDb();
   if (!db) return undefined;
   const snap = await db.collection("users").where("openId", "==", openId).limit(1).get();
-  return (firstRow(snap.docs) as User | null) ?? undefined;
+  const user = (firstRow(snap.docs) as User | null) ?? undefined;
+  return user ? sanitizeUser(user) : undefined;
 }
 
 export async function getUserByEmail(email: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const snap = await db
+    .collection("users")
+    .where("email", "==", email.trim().toLowerCase())
+    .limit(1)
+    .get();
+  const user = (firstRow(snap.docs) as User | null) ?? undefined;
+  return user ? sanitizeUser(user) : undefined;
+}
+
+/**
+ * Full user record INCLUDING the password hash, for server-side credential
+ * verification only. Never return this to a client.
+ */
+export async function getUserByEmailWithHash(email: string): Promise<User | undefined> {
   const db = await getDb();
   if (!db) return undefined;
   const snap = await db
@@ -543,7 +569,164 @@ export async function getUserById(userId: number) {
   const db = requireDatabase(await getDb());
   const user = (await getDoc(db, "users", userId)) as User | null;
   if (!user) throw new Error("Account record not found.");
+  return sanitizeUser(user);
+}
+
+/** Full record with hash, for password change verification. Never send to clients. */
+export async function getUserByIdWithHash(userId: number): Promise<User> {
+  const db = requireDatabase(await getDb());
+  const user = (await getDoc(db, "users", userId)) as User | null;
+  if (!user) throw new Error("Account record not found.");
   return user;
+}
+
+// ---------------------------------------------------------------------------
+// Email + password member authentication
+// ---------------------------------------------------------------------------
+
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function validateEmail(email: string): string {
+  const normalized = normalizeEmail(email);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) throw new Error("Enter a valid email address.");
+  return normalized;
+}
+
+/** True when the email matches the configured administrator account. */
+export function isAdminEmail(email: string): boolean {
+  const configured = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  return !!configured && normalizeEmail(email) === configured;
+}
+
+/**
+ * Create a member account with email + password.
+ * New accounts start in "review" status, same as Google signups — the
+ * administrator manually approves them.
+ */
+export async function signupMemberWithPassword(input: { name: string; email: string; password: string }) {
+  const email = validateEmail(input.email);
+  const name = input.name.trim();
+  if (name.length < 2) throw new Error("Enter your full name.");
+  const passwordError = validatePassword(input.password);
+  if (passwordError) throw new Error(passwordError);
+  if (isAdminEmail(email)) throw new Error("This email is reserved for the administrator.");
+  const existing = await getUserByEmailWithHash(email);
+  if (existing) throw new Error("An account with this email already exists. Try signing in instead.");
+  await upsertUser({
+    openId: `password:${email}`,
+    email,
+    name,
+    loginMethod: "email_password",
+    passwordHash: await hashPassword(input.password),
+    role: "user",
+    accountStatus: "review",
+    lastSignedIn: new Date(),
+  });
+  return { status: "review" as const };
+}
+
+const INVALID_CREDENTIALS = "Invalid email or password.";
+
+/** Verify member email + password credentials. Returns the sanitized user on success. */
+export async function verifyMemberPasswordLogin(input: { email: string; password: string }) {
+  const email = validateEmail(input.email);
+  const record = await getUserByEmailWithHash(email);
+  if (!record || !record.passwordHash) throw new Error(INVALID_CREDENTIALS);
+  if (record.accountStatus !== "active") {
+    if (record.accountStatus === "review") throw new Error("Your account is waiting for administrator approval.");
+    throw new Error("This account is not active. Please contact support.");
+  }
+  if (!(await verifyPassword(input.password, record.passwordHash))) throw new Error(INVALID_CREDENTIALS);
+  await upsertUser({ openId: record.openId, lastSignedIn: new Date() });
+  return sanitizeUser(record);
+}
+
+/**
+ * Start a forgot-password flow. Enumeration-safe: always returns success once
+ * mail is configured, whether or not the account exists.
+ */
+export async function requestPasswordReset(email: string) {
+  const normalized = validateEmail(email);
+  if (!isMailerConfigured()) {
+    throw new Error("Password reset by email is not available right now. Please contact support.");
+  }
+  const record = isAdminEmail(normalized) ? undefined : await getUserByEmailWithHash(normalized);
+  if (record) {
+    const { token, tokenHash } = generateResetToken();
+    const db = requireDatabase(await getDb());
+    await db.runTransaction(async (tx) => {
+      const counters = await readCounters(tx, db);
+      const id = allocId(counters, "passwordResets");
+      const now = new Date();
+      writeCounters(tx, counters);
+      tx.set(
+        docRef(db, "passwordResets", id),
+        toStore({
+          id,
+          userId: record.id,
+          tokenHash,
+          expiresAt: new Date(now.getTime() + PASSWORD_RESET_TTL_MS),
+          usedAt: null,
+          createdAt: now,
+        }),
+      );
+    });
+    const resetLink = `${appBaseUrl()}/reset-password?token=${token}`;
+    await sendMail({
+      to: normalized,
+      subject: "Reset your FMB Earning Hub password",
+      text: `Someone requested a password reset for your FMB Earning Hub account.\n\nReset your password here (valid for 1 hour):\n${resetLink}\n\nIf you did not request this, you can ignore this email.`,
+      html: `<p>Someone requested a password reset for your FMB Earning Hub account.</p><p><a href="${resetLink}">Reset your password</a> (valid for 1 hour).</p><p>If you did not request this, you can ignore this email.</p>`,
+    });
+  }
+  return { success: true as const };
+}
+
+/** Consume a reset token and set a new password. Single-use, 1-hour expiry. */
+export async function resetPasswordWithToken(input: { token: string; newPassword: string }) {
+  const passwordError = validatePassword(input.newPassword);
+  if (passwordError) throw new Error(passwordError);
+  const tokenHash = hashResetToken(input.token);
+  const db = requireDatabase(await getDb());
+  const snap = await db.collection("passwordResets").where("tokenHash", "==", tokenHash).limit(1).get();
+  const reset = firstRow(snap.docs) as PasswordReset | null;
+  const expiresAt = reset ? new Date(reset.expiresAt).getTime() : 0;
+  if (!reset || reset.usedAt || expiresAt <= Date.now()) {
+    throw new Error("This reset link is invalid or has expired. Please request a new one.");
+  }
+  const passwordHash = await hashPassword(input.newPassword);
+  const now = new Date();
+  await db.runTransaction(async (tx) => {
+    const userRef = docRef(db, "users", reset.userId);
+    const userSnap = await tx.get(userRef);
+    if (!userSnap.exists) throw new Error("The account for this reset link no longer exists.");
+    const counters = await readCounters(tx, db);
+    writeCounters(tx, counters);
+    tx.update(userRef, toStore({ passwordHash, updatedAt: now }));
+    tx.update(docRef(db, "passwordResets", reset.id), toStore({ usedAt: now }));
+  });
+  return { success: true as const };
+}
+
+/**
+ * Change the password of an authenticated member. Members who signed up with
+ * Google (no password yet) can set their first password without the current one.
+ */
+export async function changeMemberPassword(input: { userId: number; currentPassword?: string; newPassword: string }) {
+  const passwordError = validatePassword(input.newPassword);
+  if (passwordError) throw new Error(passwordError);
+  const record = await getUserByIdWithHash(input.userId);
+  if (record.passwordHash) {
+    if (!input.currentPassword || !(await verifyPassword(input.currentPassword, record.passwordHash))) {
+      throw new Error("Your current password is incorrect.");
+    }
+  }
+  const passwordHash = await hashPassword(input.newPassword);
+  const db = requireDatabase(await getDb());
+  await db.collection("users").doc(String(input.userId)).update(toStore({ passwordHash, updatedAt: new Date() }));
+  return { success: true as const };
 }
 
 export async function getAdminUsers() {
@@ -554,7 +737,7 @@ export async function getAdminUsers() {
     users.map(async (user) => {
       const walletId = await uniqueOwner(db, ukey("wallet", String(user.id)));
       const wallet = (walletId != null ? await getDoc(db, "wallets", walletId) : null) as Wallet | null;
-      return { user, wallet: wallet ?? null };
+      return { user: sanitizeUser(user), wallet: wallet ?? null };
     }),
   );
 }
@@ -1495,7 +1678,7 @@ export async function getAdminPaymentProofs() {
     .map((payment) => ({
       payment,
       package: requiredRow(pkgById.get(payment.packageId), "The related package was not found."),
-      user: requiredRow(userById.get(payment.userId), "The related user was not found."),
+      user: sanitizeUser(requiredRow(userById.get(payment.userId), "The related user was not found.")),
     }))
     .sort((a, b) => new Date(b.payment.createdAt).getTime() - new Date(a.payment.createdAt).getTime());
 }
@@ -1635,7 +1818,8 @@ export async function reviewPaymentProof(input: {
 export async function getMemberProfile(userId: number) {
   const user = await getUserById(userId);
   const membership = await getActiveMembership(userId);
-  return { user, membership };
+  const record = await getUserByIdWithHash(userId);
+  return { user, membership, hasPassword: !!record.passwordHash };
 }
 
 export async function updateMemberProfile(input: { userId: number; name: string; phone?: string }) {
@@ -1836,7 +2020,7 @@ export async function getAdminWithdrawals() {
   return withdrawals
     .map((withdrawal) => ({
       withdrawal,
-      user: requiredRow(userById.get(withdrawal.userId), "The related user was not found."),
+      user: sanitizeUser(requiredRow(userById.get(withdrawal.userId), "The related user was not found.")),
     }))
     .sort((a, b) => new Date(b.withdrawal.createdAt).getTime() - new Date(a.withdrawal.createdAt).getTime());
 }
@@ -1960,7 +2144,7 @@ export async function getAdminFraudFlags() {
     if (row) userById.set(row.id, row as User);
   }
   return flags
-    .map((flag) => ({ flag, user: requiredRow(userById.get(flag.userId), "The related user was not found.") }))
+    .map((flag) => ({ flag, user: sanitizeUser(requiredRow(userById.get(flag.userId), "The related user was not found.")) }))
     .sort((a, b) => new Date(b.flag.createdAt).getTime() - new Date(a.flag.createdAt).getTime())
     .slice(0, 100);
 }

@@ -17,6 +17,8 @@ export interface User {
   email: string | null;
   phone: string | null;
   loginMethod: string | null;
+  /** Scrypt password hash for email+password members. Null for Google-only or admin accounts. Never sent to clients. */
+  passwordHash: string | null;
   role: UserRole;
   accountStatus: AccountStatus;
   referralCode: string | null;
@@ -361,3 +363,16 @@ export interface PlatformSetting {
 
 export type InsertPlatformSetting = Omit<PlatformSetting, "id" | "updatedAt"> &
   Partial<Pick<PlatformSetting, "id" | "updatedAt">>;
+
+export interface PasswordReset {
+  id: number;
+  userId: number;
+  /** SHA-256 hex of the reset token. The raw token only ever travels by email. */
+  tokenHash: string;
+  expiresAt: Date;
+  usedAt: Date | null;
+  createdAt: Date;
+}
+
+export type InsertPasswordReset = Omit<PasswordReset, "id" | "createdAt"> &
+  Partial<Pick<PasswordReset, "id" | "createdAt">>;

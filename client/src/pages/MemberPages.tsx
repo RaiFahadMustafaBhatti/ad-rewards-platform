@@ -138,5 +138,40 @@ export function MemberProfile() {
   return <div><PageIntro eyebrow="Account profile" title="Your account information" description="Keep permitted contact information current. Passwords and sign-in credentials are managed by the secure sign-in service and are never shown here." />
     <div className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]"><section className="rounded-2xl bg-[#10233f] p-6 text-white"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-white/10 text-[#6ee7dc]"><UserCircle2 size={25} /></span><h2 className="mt-5 text-xl font-extrabold">{profile.data?.user.name ?? "Member account"}</h2><p className="mt-2 text-sm text-slate-300">{profile.data?.user.email ?? "Email is managed by your sign-in provider."}</p><div className="mt-7 space-y-3 text-sm"><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Account status</span><p className="mt-1 font-bold capitalize">{profile.data?.user.accountStatus ?? "Loading"}</p></div><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Current membership</span><p className="mt-1 font-bold">{profile.data?.membership?.package.name ?? "No active membership"}</p></div><p className="px-1 text-xs leading-5 text-slate-400">Registration date: {profile.data?.user.createdAt ? new Date(profile.data.user.createdAt).toLocaleDateString("en-PK") : "—"}</p></div></section>
       <form onSubmit={submit} className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-extrabold">Permitted details</h2><p className="mt-2 text-sm leading-6 text-slate-600">Payment details are not stored in this profile and are requested only when you create a withdrawal request.</p><div className="mt-5 grid gap-4"><label className="grid gap-1.5 text-sm font-bold text-slate-700">Full name<input required value={name} onChange={event => setName(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Pakistani mobile number <span className="font-normal text-slate-500">Optional; e.g. 03XXXXXXXXX</span><input value={phone} onChange={event => setPhone(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Email <input disabled value={profile.data?.user.email ?? "Managed by sign-in provider"} className="h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500" /></label></div><Button disabled={update.isPending} className="mt-6 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">{update.isPending ? <Loader2 className="animate-spin" size={17} /> : "Save permitted updates"}</Button></form></div>
+    <PasswordSection hasPassword={profile.data?.hasPassword ?? false} onChanged={() => profile.refetch()} />
   </div>;
+}
+
+function PasswordSection({ hasPassword, onChanged }: { hasPassword: boolean; onChanged: () => void }) {
+  const changePassword = trpc.profile.changePassword.useMutation();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) {
+      toast.error("The new passwords do not match.");
+      return;
+    }
+    try {
+      await changePassword.mutateAsync({ currentPassword: currentPassword || undefined, newPassword });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      toast.success(hasPassword ? "Password changed." : "Password set. You can now sign in with email and password too.");
+      onChanged();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "The password could not be updated.");
+    }
+  };
+  return <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-6">
+    <h2 className="text-lg font-extrabold">Sign-in password</h2>
+    <p className="mt-2 text-sm leading-6 text-slate-600">{hasPassword ? "Change the password you use to sign in with your email." : "You signed up with Google. Set a password to also sign in with your email and password."}</p>
+    <form onSubmit={submit} className="mt-5 grid gap-4 sm:max-w-md">
+      {hasPassword && <label className="grid gap-1.5 text-sm font-bold text-slate-700">Current password<input required type="password" autoComplete="current-password" value={currentPassword} onChange={event => setCurrentPassword(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label>}
+      <label className="grid gap-1.5 text-sm font-bold text-slate-700">{hasPassword ? "New password" : "Password"}<input required type="password" autoComplete="new-password" minLength={8} value={newPassword} onChange={event => setNewPassword(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" placeholder="At least 8 characters" /></label>
+      <label className="grid gap-1.5 text-sm font-bold text-slate-700">Confirm new password<input required type="password" autoComplete="new-password" minLength={8} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label>
+      <div><Button disabled={changePassword.isPending} className="rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">{changePassword.isPending ? <Loader2 className="animate-spin" size={17} /> : hasPassword ? "Change password" : "Set password"}</Button></div>
+    </form>
+  </section>;
 }
