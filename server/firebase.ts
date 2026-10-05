@@ -62,11 +62,20 @@ export function isFirebaseConfigured(): boolean {
   return getFirebaseApp() !== null;
 }
 
+let firestoreInstance: Firestore | null = null;
+
 export function getFirestore(): Firestore | null {
   const firebaseApp = getFirebaseApp();
   if (!firebaseApp) return null;
   try {
-    return getAdminFirestore(firebaseApp);
+    if (!firestoreInstance) {
+      firestoreInstance = getAdminFirestore(firebaseApp);
+      // Use the REST transport instead of gRPC. Serverless instances cannot
+      // reuse gRPC channels across invocations, and channel setup was adding
+      // ~10s to every API request. REST is stateless per request.
+      firestoreInstance.settings({ preferRest: true });
+    }
+    return firestoreInstance;
   } catch (error) {
     console.warn("[Firebase] Firestore unavailable:", error);
     return null;
