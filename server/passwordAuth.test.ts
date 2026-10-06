@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   requestPasswordReset: vi.fn(),
   resetPasswordWithToken: vi.fn(),
   changeMemberPassword: vi.fn(),
+  deleteMemberAccount: vi.fn(),
   getUserByEmail: vi.fn(),
   getUserByOpenId: vi.fn(),
   upsertUser: vi.fn(),
@@ -20,6 +21,7 @@ vi.mock("./db", async () => ({
   requestPasswordReset: mocks.requestPasswordReset,
   resetPasswordWithToken: mocks.resetPasswordWithToken,
   changeMemberPassword: mocks.changeMemberPassword,
+  deleteMemberAccount: mocks.deleteMemberAccount,
   getUserByEmail: mocks.getUserByEmail,
   getUserByOpenId: mocks.getUserByOpenId,
   upsertUser: mocks.upsertUser,
@@ -167,6 +169,32 @@ describe("auth.requestPasswordReset / auth.resetPassword", () => {
       caller.auth.resetPassword({ token: "a".repeat(64), newPassword: "brand-new-123" }),
     ).resolves.toEqual({ success: true });
     expect(mocks.resetPasswordWithToken).toHaveBeenCalledWith({ token: "a".repeat(64), newPassword: "brand-new-123" });
+  });
+});
+
+describe("profile.deleteAccount", () => {
+  it("deletes the authenticated member and clears the session cookie", async () => {
+    mocks.deleteMemberAccount.mockResolvedValue({ success: true, deletedDocuments: 5 });
+    const cleared: Array<{ name: string }> = [];
+    const ctx = {
+      user: { id: 7 },
+      req: { protocol: "https", headers: {} },
+      res: {
+        cookie: () => {},
+        clearCookie: (name: string) => cleared.push({ name }),
+      },
+    } as unknown as TrpcContext;
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.deleteAccount()).resolves.toEqual({ success: true, deletedDocuments: 5 });
+    expect(mocks.deleteMemberAccount).toHaveBeenCalledWith(7);
+    expect(cleared).toEqual([{ name: "app_session_id" }]);
+  });
+
+  it("requires authentication", async () => {
+    const { ctx } = makeCtx(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.deleteAccount()).rejects.toThrow();
+    expect(mocks.deleteMemberAccount).not.toHaveBeenCalled();
   });
 });
 

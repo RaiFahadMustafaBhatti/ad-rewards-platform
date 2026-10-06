@@ -127,6 +127,47 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
 }
 
 /**
+ * Delete a stored object. Best-effort: returns false (and logs) when storage
+ * is unconfigured or the delete fails, so callers like account purging can
+ * continue with the database cleanup.
+ */
+export async function storageDelete(relKey: string): Promise<boolean> {
+  let config: B2Config;
+  try {
+    config = getB2Config();
+  } catch {
+    console.warn("[Storage] Skipping delete; B2 is not configured.");
+    return false;
+  }
+  const { host, region } = endpointParts(config);
+  const key = normalizeKey(relKey);
+  try {
+    const signed = aws4.sign(
+      {
+        host,
+        method: "DELETE",
+        path: `/${config.bucket}/${key}`,
+        service: "s3",
+        region,
+      },
+      { accessKeyId: config.keyId, secretAccessKey: config.applicationKey },
+    );
+    const res = await fetch(`https://${host}/${config.bucket}/${key}`, {
+      method: "DELETE",
+      headers: signed.headers as Record<string, string>,
+    });
+    if (!res.ok && res.status !== 404) {
+      console.warn(`[Storage] DeleteObject failed (${res.status}) for ${key}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.warn("[Storage] DeleteObject failed:", error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
+/**
  * Mint a short-lived presigned GET URL for a private object. Used for
  * owner/admin-only downloads such as payment proof screenshots.
  */

@@ -139,7 +139,45 @@ export function MemberProfile() {
     <div className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]"><section className="rounded-2xl bg-[#10233f] p-6 text-white"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-white/10 text-[#6ee7dc]"><UserCircle2 size={25} /></span><h2 className="mt-5 text-xl font-extrabold">{profile.data?.user.name ?? "Member account"}</h2><p className="mt-2 text-sm text-slate-300">{profile.data?.user.email ?? "Email is managed by your sign-in provider."}</p><div className="mt-7 space-y-3 text-sm"><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Account status</span><p className="mt-1 font-bold capitalize">{profile.data?.user.accountStatus ?? "Loading"}</p></div><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Current membership</span><p className="mt-1 font-bold">{profile.data?.membership?.package.name ?? "No active membership"}</p></div><p className="px-1 text-xs leading-5 text-slate-400">Registration date: {profile.data?.user.createdAt ? new Date(profile.data.user.createdAt).toLocaleDateString("en-PK") : "—"}</p></div></section>
       <form onSubmit={submit} className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-extrabold">Permitted details</h2><p className="mt-2 text-sm leading-6 text-slate-600">Payment details are not stored in this profile and are requested only when you create a withdrawal request.</p><div className="mt-5 grid gap-4"><label className="grid gap-1.5 text-sm font-bold text-slate-700">Full name<input required value={name} onChange={event => setName(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Pakistani mobile number <span className="font-normal text-slate-500">Optional; e.g. 03XXXXXXXXX</span><input value={phone} onChange={event => setPhone(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Email <input disabled value={profile.data?.user.email ?? "Managed by sign-in provider"} className="h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500" /></label></div><Button disabled={update.isPending} className="mt-6 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">{update.isPending ? <Loader2 className="animate-spin" size={17} /> : "Save permitted updates"}</Button></form></div>
     <PasswordSection hasPassword={profile.data?.hasPassword ?? false} onChanged={() => profile.refetch()} />
+    <AccountActionsSection />
   </div>;
+}
+
+function AccountActionsSection() {
+  const { logout } = useAuth();
+  const deleteAccount = trpc.profile.deleteAccount.useMutation();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const signOut = async () => {
+    await logout();
+    window.location.assign("/");
+  };
+  const removeAccount = async () => {
+    try {
+      await deleteAccount.mutateAsync();
+      window.location.assign("/");
+    } catch (error) {
+      setConfirmingDelete(false);
+      toast.error(error instanceof Error ? error.message : "The account could not be deleted.");
+    }
+  };
+  return <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-6">
+    <h2 className="text-lg font-extrabold">Account actions</h2>
+    <p className="mt-2 text-sm leading-6 text-slate-600">Sign out of this device, or permanently remove your account and all of its data.</p>
+    <div className="mt-5 flex flex-wrap gap-3">
+      <Button variant="outline" onClick={signOut} className="rounded-xl border-slate-300 font-bold">Sign out</Button>
+    </div>
+    <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-5">
+      <h3 className="font-extrabold text-rose-900">Delete account</h3>
+      {!confirmingDelete
+        ? <><p className="mt-1 text-sm leading-6 text-rose-800">This permanently removes your account, wallet, memberships, earnings history, and uploaded proofs. This cannot be undone.</p>
+          <Button onClick={() => setConfirmingDelete(true)} className="mt-4 rounded-xl bg-rose-600 font-bold hover:bg-rose-700">Delete my account</Button></>
+        : <><p className="mt-1 text-sm font-bold leading-6 text-rose-900">Are you absolutely sure? Your account and everything in it will be gone forever.</p>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <Button disabled={deleteAccount.isPending} onClick={removeAccount} className="rounded-xl bg-rose-700 font-bold hover:bg-rose-800">{deleteAccount.isPending ? <Loader2 className="animate-spin" size={17} /> : "Yes, permanently delete it"}</Button>
+            <Button variant="outline" onClick={() => setConfirmingDelete(false)} className="rounded-xl border-rose-300 font-bold text-rose-800">Keep my account</Button>
+          </div></>}
+    </div>
+  </section>;
 }
 
 function PasswordSection({ hasPassword, onChanged }: { hasPassword: boolean; onChanged: () => void }) {

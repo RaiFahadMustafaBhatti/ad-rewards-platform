@@ -56,6 +56,7 @@ import {
 import { ENV } from "./_core/env";
 import { generateResetToken, hashPassword, hashResetToken, PASSWORD_RESET_TTL_MS, validatePassword, verifyPassword } from "./passwords";
 import { appBaseUrl, isMailerConfigured, sendMail } from "./mailer";
+import { storageDelete } from "./storage";
 import { storageGetSignedUrl } from "./storage";
 import { assertPendingPaymentDecision } from "./workflowGuards";
 import {
@@ -736,6 +737,85 @@ export async function changeMemberPassword(input: { userId: number; currentPassw
   const db = requireDatabase(await getDb());
   await db.collection("users").doc(String(input.userId)).update(toStore({ passwordHash, updatedAt: new Date() }));
   return { success: true as const };
+}
+
+/**
+ * Permanently delete a member account and everything it owns.
+ *
+ * Blocked while money could be lost: a non-zero wallet balance, a withdrawal
+ * that is still pending/processing, or a payment proof awaiting review.
+ * The administrator account can never be deleted this way.
+ */
+export async function deleteMemberAccount(userId: number) {
+  const db = requireDatabase(await getDb());
+  const user = await getUserByIdWithHash(userId);
+  if (user.role === "admin") throw new Error("The administrator account cannot be deleted.");
+
+  const walletId = await uniqueOwner(db, ukey("wallet", String(userId)));
+  const wallet = (walletId != null ? await getDoc(db, "wallets", walletId) : null) as Wallet | null;
+  const balancePaisa = wallet ? Number(wallet.availableBalancePaisa ?? 0) : 0;
+  if (balancePaisa > 0) {
+    throw new Error("Please withdraw your remaining balance before deleting your account.");
+  }
+  const openWithdrawal = await db
+    .collection("withdrawals")
+    .where("userId", "==", userId)
+    .where("status", "in", ["pending", "processing"])
+    .limit(1)
+    .get();
+  if (!openWithdrawal.empty) {
+    throw new Error("You have a withdrawal request being processed. Please wait for it to finish before deleting your account.");
+  }
+  const openProof = await db
+    .collection("paymentProofs")
+    .where("userId", "==", userId)
+    .where("status", "==", "pending")
+    .limit(1)
+    .get();
+  if (!openProof.empty) {
+    throw new Error("You have a payment proof waiting for review. Please wait for it to be processed before deleting your account.");
+  }
+
+  // Collect payment-proof screenshots before their docs are removed.
+  const proofs = await db.collection("paymentProofs").where("userId", "==", userId).get();
+  const screenshotKeys = proofs.docs
+    .map((doc) => (doc.data() as Row).screenshotKey)
+    .filter((key): key is string => typeof key === "string" && key.length > 0);
+
+  const refs: DocumentReference[] = [];
+  const ownedCollections: Array<[string, string]> = [
+    ["userPackages", "userId"],
+    ["ledgerEntries", "userId"],
+    ["videoCompletions", "userId"],
+    ["videoWatchSessions", "userId"],
+    ["paymentProofs", "userId"],
+    ["withdrawals", "userId"],
+    ["notifications", "userId"],
+    ["passwordResets", "userId"],
+    ["fraudFlags", "userId"],
+    ["adViews", "userId"],
+    ["auditLogs", "actorUserId"],
+  ];
+  for (const [collection, field] of ownedCollections) {
+    const snap = await db.collection(collection).where(field, "==", userId).get();
+    snap.docs.forEach((doc) => refs.push(doc.ref));
+  }
+  if (walletId != null) refs.push(db.collection("wallets").doc(String(walletId)));
+  refs.push(db.collection("users").doc(String(userId)));
+  const claimKeys = [ukey("user", "email", user.email ?? ""), ukey("user", "openid", user.openId), ukey("wallet", String(userId))];
+  for (const key of claimKeys) refs.push(db.collection("unique").doc(key));
+
+  for (let i = 0; i < refs.length; i += 400) {
+    const batch = db.batch();
+    refs.slice(i, i + 400).forEach((ref) => batch.delete(ref));
+    await batch.commit();
+  }
+
+  for (const key of screenshotKeys) {
+    await storageDelete(key);
+  }
+
+  return { success: true as const, deletedDocuments: refs.length };
 }
 
 export async function getAdminUsers() {

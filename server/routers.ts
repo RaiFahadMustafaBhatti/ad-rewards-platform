@@ -13,6 +13,7 @@ import {
   createWithdrawal,
   completeVideoWatchSession,
   deleteCampaign,
+  deleteMemberAccount,
   deleteRewardVideo,
   getAuthorizedPaymentProofUrl,
   getAdminPackages,
@@ -348,6 +349,13 @@ export const appRouter = router({
     }),
     changePassword: protectedProcedure.input(z.object({ currentPassword: z.string().max(256).optional(), newPassword: z.string().min(8).max(256) })).mutation(async ({ ctx, input }) => {
       try { return await changeMemberPassword({ userId: ctx.user.id, currentPassword: input.currentPassword, newPassword: input.newPassword }); } catch (error) { return toDomainError(error); }
+    }),
+    deleteAccount: protectedProcedure.mutation(async ({ ctx }) => {
+      try {
+        const result = await deleteMemberAccount(ctx.user.id);
+        ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 });
+        return result;
+      } catch (error) { return toDomainError(error); }
     }),
   }),
   ledger: router({
