@@ -20,6 +20,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
+import { trpc } from "@/lib/trpc";
 import { BadgeDollarSign, Bell, Clock3, CreditCard, LayoutDashboard, LogOut, Megaphone, PanelLeft, ReceiptText, ShieldAlert, UserCircle2, Users, Video, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -113,6 +114,26 @@ export default function DashboardLayout({
       </DashboardLayoutContent>
     </SidebarProvider>
   );
+}
+
+/**
+ * Google signups skip the signup form, so an invite code from an invite link
+ * (?ref=CODE, stashed in sessionStorage by the sign-in page) is linked here
+ * on the first dashboard load. Rewards still pay out on admin approval.
+ */
+function PendingReferralLinker({ userId, alreadyLinked }: { userId: number; alreadyLinked: boolean }) {
+  const applyReferral = trpc.profile.applyReferralCode.useMutation();
+  useEffect(() => {
+    if (alreadyLinked) return;
+    let pending: string | null = null;
+    try { pending = sessionStorage.getItem("fmb-pending-ref"); } catch {}
+    if (!pending) return;
+    applyReferral.mutateAsync({ referralCode: pending }).catch(() => {}).finally(() => {
+      try { sessionStorage.removeItem("fmb-pending-ref"); } catch {}
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+  return null;
 }
 
 type DashboardLayoutContentProps = {
@@ -278,6 +299,7 @@ function DashboardLayoutContent({
         )}
         <main className="flex-1 p-4">{children}</main>
       </SidebarInset>
+      {user && user.role !== "admin" && <PendingReferralLinker userId={user.id} alreadyLinked={Boolean((user as unknown as { referredByUserId?: number | null }).referredByUserId)} />}
     </>
   );
 }

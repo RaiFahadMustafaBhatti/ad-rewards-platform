@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   resetPasswordWithToken: vi.fn(),
   changeMemberPassword: vi.fn(),
   deleteMemberAccount: vi.fn(),
+  applyReferralCode: vi.fn(),
   getUserByEmail: vi.fn(),
   getUserByOpenId: vi.fn(),
   upsertUser: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("./db", async () => ({
   resetPasswordWithToken: mocks.resetPasswordWithToken,
   changeMemberPassword: mocks.changeMemberPassword,
   deleteMemberAccount: mocks.deleteMemberAccount,
+  applyReferralCode: mocks.applyReferralCode,
   getUserByEmail: mocks.getUserByEmail,
   getUserByOpenId: mocks.getUserByOpenId,
   upsertUser: mocks.upsertUser,
@@ -150,6 +152,33 @@ describe("auth.passwordSignup", () => {
       caller.auth.passwordSignup({ name: "New Member", email: "new@yahoo.com", password: "new-pass-123", phone: "03001234567" }),
     ).rejects.toThrow(/Gmail/);
     expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("passes an optional referral code through to signup", async () => {
+    mocks.signupMemberWithPassword.mockResolvedValue({ status: "review" });
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567", referralCode: "ABC123" });
+    expect(mocks.signupMemberWithPassword).toHaveBeenCalledWith(
+      expect.objectContaining({ referralCode: "ABC123" }),
+    );
+  });
+});
+
+describe("profile.applyReferralCode", () => {
+  it("links a referral code for the authenticated member", async () => {
+    mocks.applyReferralCode.mockResolvedValue({ referredByUserId: 3 });
+    const { ctx } = makeCtx({ id: 7 });
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.applyReferralCode({ referralCode: "ABC123" })).resolves.toEqual({ referredByUserId: 3 });
+    expect(mocks.applyReferralCode).toHaveBeenCalledWith(7, "ABC123");
+  });
+
+  it("requires authentication", async () => {
+    const { ctx } = makeCtx(null);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.profile.applyReferralCode({ referralCode: "ABC123" })).rejects.toThrow();
+    expect(mocks.applyReferralCode).not.toHaveBeenCalled();
   });
 });
 

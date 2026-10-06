@@ -23,7 +23,7 @@ import {
   type Query,
   type Transaction,
 } from "firebase-admin/firestore";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { getFirestore } from "./firebase";
 import type {
   AdCampaign,
@@ -45,7 +45,7 @@ import type {
   Wallet,
   Withdrawal,
 } from "../drizzle/schema";
-import { INITIAL_PACKAGES, INITIAL_PLATFORM_SETTINGS } from "../shared/platform";
+import { formatPkr, INITIAL_PACKAGES, INITIAL_PLATFORM_SETTINGS } from "../shared/platform";
 import {
   calculateWithdrawalQuote,
   evaluateAdCompletion,
@@ -447,7 +447,7 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   const values: Row = { openId: user.openId };
   const updateSet: Row = {};
-  (["name", "email", "loginMethod", "passwordHash", "phone"] as const).forEach((field) => {
+  (["name", "email", "loginMethod", "passwordHash", "phone", "referredByUserId"] as const).forEach((field) => {
     if (user[field] !== undefined) {
       const value = (user[field] ?? null) as string | null;
       values[field] = value;
@@ -600,6 +600,224 @@ export function isGmailAddress(email: string): boolean {
   return normalizeEmail(email).endsWith("@gmail.com");
 }
 
+// ---------------------------------------------------------------------------
+// Referrals
+// ---------------------------------------------------------------------------
+
+const REFERRAL_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+function generateReferralCode(): string {
+  const bytes = randomBytes(6);
+  let code = "";
+  for (let i = 0; i < bytes.length; i++) code += REFERRAL_CODE_ALPHABET[bytes[i] % REFERRAL_CODE_ALPHABET.length];
+  return code;
+}
+
+function referralsEnabled(settings: Record<string, string>): boolean {
+  return settings.referrals_enabled === "true";
+}
+
+/** Look up the member who owns a referral code. Returns null for unknown codes. */
+export async function getUserByReferralCode(code: string): Promise<User | null> {
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return null;
+  const db = requireDatabase(await getDb());
+  const ownerId = await uniqueOwner(db, ukey("user", "referralcode", normalized));
+  if (ownerId == null) return null;
+  const user = (await getDoc(db, "users", ownerId)) as User | null;
+  return user && user.referralCode === normalized ? user : null;
+}
+
+/**
+ * Assign a referral code to a member once they have bought a combo
+ * (an active or completed membership). Idempotent; returns the code or null
+ * when the member is not eligible yet.
+ */
+export async function ensureReferralCode(userId: number): Promise<string | null> {
+  const db = requireDatabase(await getDb());
+  const user = (await getDoc(db, "users", userId)) as User | null;
+  if (!user || user.role === "admin") return null;
+  if (user.referralCode) return user.referralCode;
+  const bought = await db
+    .collection("userPackages")
+    .where("userId", "==", userId)
+    .where("status", "in", ["active", "expired"])
+    .limit(1)
+    .get();
+  if (bought.empty) return null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateReferralCode();
+    const key = ukey("user", "referralcode", code);
+    try {
+      await db.runTransaction(async (tx) => {
+        const claim = await peekUniqueClaim(tx, db, key);
+        if (claim.snap.exists) throw new Error("referral code collision");
+        applyUniqueClaim(tx, claim, userId, "This referral code is already taken.");
+        tx.update(docRef(db, "users", userId), { referralCode: code, updatedAt: new Date() });
+      });
+      return code;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "referral code collision") throw error;
+    }
+  }
+  return null;
+}
+
+/** Resolve and validate a referral code supplied at signup. Throws on invalid codes. */
+async function resolveSignupReferral(code: string, settings: Record<string, string>): Promise<User> {
+  const inviter = await getUserByReferralCode(code);
+  if (!inviter) throw new Error("That referral code is not valid. Check it and try again.");
+  if (inviter.role === "admin" || inviter.accountStatus !== "active") {
+    throw new Error("That referral code is not valid. Check it and try again.");
+  }
+  if (!inviter.referralCode) throw new Error("That referral code is not valid. Check it and try again.");
+  return inviter;
+}
+
+/** Link a referral code to an existing member (Google signups). Only while still in review. */
+export async function applyReferralCode(userId: number, code: string): Promise<{ referredByUserId: number }> {
+  const db = requireDatabase(await getDb());
+  const settings = await getSettingMap();
+  if (!referralsEnabled(settings)) throw new Error("Referrals are not enabled right now.");
+  const user = (await getDoc(db, "users", userId)) as User | null;
+  if (!user) throw new Error("Account not found.");
+  if (user.referredByUserId) throw new Error("A referral code is already linked to this account.");
+  if (user.accountStatus !== "review") throw new Error("Referral codes can only be added before your account is approved.");
+  const inviter = await resolveSignupReferral(code, settings);
+  if (inviter.id === userId) throw new Error("You cannot use your own referral code.");
+  await db.collection("users").doc(String(userId)).update(toStore({ referredByUserId: inviter.id, updatedAt: new Date() }));
+  return { referredByUserId: inviter.id };
+}
+
+/**
+ * Pay referral rewards when a referred member is approved. The inviter gets
+ * referral_reward_paisa (capped by referral_reward_max_paisa lifetime) and the
+ * new member gets referee_reward_paisa. Idempotent.
+ */
+export async function payReferralRewards(inviteeUserId: number): Promise<{ paid: boolean }> {
+  const db = requireDatabase(await getDb());
+  const settings = await getSettingMap();
+  if (!referralsEnabled(settings)) return { paid: false };
+  const invitee = (await getDoc(db, "users", inviteeUserId)) as User | null;
+  if (!invitee || !invitee.referredByUserId || invitee.accountStatus !== "active") return { paid: false };
+  const alreadyPaid = await db
+    .collection("ledgerEntries")
+    .where("relatedEntityType", "==", "referral")
+    .where("relatedEntityId", "==", inviteeUserId)
+    .limit(1)
+    .get();
+  if (!alreadyPaid.empty) return { paid: false };
+
+  const inviter = (await getDoc(db, "users", invitee.referredByUserId)) as User | null;
+  const inviterRewardPaisa = Math.max(0, parseInt(settings.referral_reward_paisa ?? "0", 10) || 0);
+  const refereeRewardPaisa = Math.max(0, parseInt(settings.referee_reward_paisa ?? "0", 10) || 0);
+  const maxPaisa = Math.max(0, parseInt(settings.referral_reward_max_paisa ?? "0", 10) || 0);
+  if (inviterRewardPaisa === 0 && refereeRewardPaisa === 0) return { paid: false };
+
+  let payInviter = inviterRewardPaisa > 0 && inviter != null && inviter.accountStatus === "active";
+  if (payInviter && maxPaisa > 0 && inviter) {
+    const past = await db
+      .collection("ledgerEntries")
+      .where("userId", "==", inviter.id)
+      .where("transactionType", "==", "referral_reward")
+      .get();
+    const earned = past.docs.reduce((sum, doc) => sum + Number((doc.data() as Row).amountPaisa ?? 0), 0);
+    if (earned >= maxPaisa) payInviter = false;
+  }
+  if (!payInviter && refereeRewardPaisa === 0) return { paid: false };
+
+  // Wallets are ensured outside the payout transaction (ensureWallet has its own).
+  const inviteeWallet = await ensureWallet(inviteeUserId);
+  const inviterWallet = payInviter && inviter ? await ensureWallet(inviter.id) : null;
+
+  const now = new Date();
+  await db.runTransaction(async (tx) => {
+    // ---- read phase: every tx.get happens before any write ----
+    const counters = await readCounters(tx, db);
+    const inviteeSnap = await tx.get(docRef(db, "wallets", inviteeWallet.id));
+    const inviterSnap = inviterWallet ? await tx.get(docRef(db, "wallets", inviterWallet.id)) : null;
+    // ---- compute phase (pure) ----
+    const groupId = randomUUID();
+    const payouts: Array<{
+      userId: number;
+      type: "referral_reward" | "referee_reward";
+      amount: number;
+      wallet: Wallet;
+      description: string;
+      title: string;
+      message: string;
+    }> = [];
+    if (inviter && inviterSnap && inviterSnap.exists && payInviter) {
+      const wallet = inviterSnap.data() as unknown as Wallet;
+      payouts.push({
+        userId: inviter.id,
+        type: "referral_reward",
+        amount: inviterRewardPaisa,
+        wallet,
+        description: `Referral reward for inviting ${invitee.name ?? invitee.email ?? "a new member"}`,
+        title: "Referral reward credited",
+        message: `You earned ${formatPkr(inviterRewardPaisa)} for inviting a new member.`,
+      });
+    }
+    if (refereeRewardPaisa > 0 && inviteeSnap.exists) {
+      const wallet = inviteeSnap.data() as unknown as Wallet;
+      payouts.push({
+        userId: inviteeUserId,
+        type: "referee_reward",
+        amount: refereeRewardPaisa,
+        wallet,
+        description: "Welcome reward for joining with a referral code",
+        title: "Welcome reward credited",
+        message: `You received ${formatPkr(refereeRewardPaisa)} for joining with a referral code.`,
+      });
+    }
+    if (payouts.length === 0) return;
+    const ledgerIds = payouts.map(() => allocId(counters, "ledgerEntries"));
+    const notificationIds = payouts.map(() => allocId(counters, "notifications"));
+    // ---- write phase ----
+    writeCounters(tx, counters);
+    payouts.forEach((payout, index) => {
+      tx.update(docRef(db, "wallets", payout.wallet.id), {
+        availableBalancePaisa: payout.wallet.availableBalancePaisa + payout.amount,
+        lifetimeEarnedPaisa: payout.wallet.lifetimeEarnedPaisa + payout.amount,
+      });
+      tx.set(
+        docRef(db, "ledgerEntries", ledgerIds[index]),
+        toStore({
+          id: ledgerIds[index],
+          transactionGroupId: groupId,
+          userId: payout.userId,
+          transactionType: payout.type,
+          direction: "credit",
+          amountPaisa: payout.amount,
+          previousAvailableBalancePaisa: payout.wallet.availableBalancePaisa,
+          newAvailableBalancePaisa: payout.wallet.availableBalancePaisa + payout.amount,
+          previousHeldBalancePaisa: payout.wallet.heldBalancePaisa,
+          newHeldBalancePaisa: payout.wallet.heldBalancePaisa,
+          relatedEntityType: "referral",
+          relatedEntityId: inviteeUserId,
+          description: payout.description,
+          createdByUserId: null,
+          createdAt: now,
+        } satisfies LedgerEntry),
+      );
+      tx.set(
+        docRef(db, "notifications", notificationIds[index]),
+        toStore({
+          id: notificationIds[index],
+          userId: payout.userId,
+          title: payout.title,
+          message: payout.message,
+          type: "success",
+          readAt: null,
+          createdAt: now,
+        } satisfies Notification),
+      );
+    });
+  });
+  return { paid: true };
+}
+
 /** True when the email matches the configured administrator account. */
 export function isAdminEmail(email: string): boolean {
   const configured = process.env.ADMIN_EMAIL?.trim().toLowerCase();
@@ -611,7 +829,7 @@ export function isAdminEmail(email: string): boolean {
  * New accounts start in "review" status, same as Google signups — the
  * administrator manually approves them.
  */
-export async function signupMemberWithPassword(input: { name: string; email: string; password: string; phone: string }) {
+export async function signupMemberWithPassword(input: { name: string; email: string; password: string; phone: string; referralCode?: string }) {
   const email = validateEmail(input.email);
   if (!isGmailAddress(email)) throw new Error("Please sign up with a valid Gmail address (example@gmail.com).");
   const name = input.name.trim();
@@ -623,6 +841,15 @@ export async function signupMemberWithPassword(input: { name: string; email: str
   if (isAdminEmail(email)) throw new Error("This email is reserved for the administrator.");
   const existing = await getUserByEmailWithHash(email);
   if (existing) throw new Error("An account with this email already exists. Try signing in instead.");
+  let referredByUserId: number | null = null;
+  const referralCode = input.referralCode?.trim().toUpperCase() ?? "";
+  if (referralCode) {
+    const settings = await getSettingMap();
+    if (referralsEnabled(settings)) {
+      const inviter = await resolveSignupReferral(referralCode, settings);
+      referredByUserId = inviter.id;
+    }
+  }
   await upsertUser({
     openId: `password:${email}`,
     email,
@@ -630,6 +857,7 @@ export async function signupMemberWithPassword(input: { name: string; email: str
     loginMethod: "email_password",
     passwordHash: await hashPassword(input.password),
     phone,
+    referredByUserId,
     role: "user",
     accountStatus: "review",
     lastSignedIn: new Date(),
@@ -875,6 +1103,12 @@ export async function updateUserAccountStatus(input: {
       } satisfies Notification),
     );
   });
+  if (input.accountStatus === "active" && target.accountStatus !== "active") {
+    // A newly approved member triggers referral rewards (idempotent).
+    payReferralRewards(input.userId).catch((error) => {
+      console.warn("[Referrals] payReferralRewards failed:", error instanceof Error ? error.message : error);
+    });
+  }
   return { accountStatus: input.accountStatus };
 }
 
@@ -1896,6 +2130,10 @@ export async function reviewPaymentProof(input: {
       } satisfies AuditLog),
     );
   });
+  // The member just bought a combo: assign their referral code (idempotent).
+  ensureReferralCode(payment.userId).catch((error) => {
+    console.warn("[Referrals] ensureReferralCode failed:", error instanceof Error ? error.message : error);
+  });
   return { status: "approved" as const };
 }
 
@@ -1903,7 +2141,12 @@ export async function getMemberProfile(userId: number) {
   const user = await getUserById(userId);
   const membership = await getActiveMembership(userId);
   const record = await getUserByIdWithHash(userId);
-  return { user, membership, hasPassword: !!record.passwordHash };
+  // Lazy-assign the referral code once the member has bought a combo.
+  const referralCode = await ensureReferralCode(userId).catch(() => null);
+  const db = requireDatabase(await getDb());
+  const invitedSnap = await db.collection("users").where("referredByUserId", "==", userId).get();
+  const invitedCount = invitedSnap.size;
+  return { user, membership, hasPassword: !!record.passwordHash, referralCode, invitedCount };
 }
 
 export async function updateMemberProfile(input: { userId: number; name: string; phone?: string }) {

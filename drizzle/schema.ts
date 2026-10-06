@@ -279,6 +279,7 @@ export type LedgerTransactionType =
   | "withdrawal_payment"
   | "withdrawal_reversal"
   | "referral_reward"
+  | "referee_reward"
   | "admin_adjustment";
 export type LedgerDirection = "credit" | "debit" | "hold" | "release";
 

@@ -139,8 +139,33 @@ export function MemberProfile() {
     <div className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]"><section className="rounded-2xl bg-[#10233f] p-6 text-white"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-white/10 text-[#6ee7dc]"><UserCircle2 size={25} /></span><h2 className="mt-5 text-xl font-extrabold">{profile.data?.user.name ?? "Member account"}</h2><p className="mt-2 text-sm text-slate-300">{profile.data?.user.email ?? "Email is managed by your sign-in provider."}</p><div className="mt-7 space-y-3 text-sm"><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Account status</span><p className="mt-1 font-bold capitalize">{profile.data?.user.accountStatus ?? "Loading"}</p></div><div className="rounded-xl bg-white/10 p-3"><span className="text-slate-300">Current membership</span><p className="mt-1 font-bold">{profile.data?.membership?.package.name ?? "No active membership"}</p></div><p className="px-1 text-xs leading-5 text-slate-400">Registration date: {profile.data?.user.createdAt ? new Date(profile.data.user.createdAt).toLocaleDateString("en-PK") : "—"}</p></div></section>
       <form onSubmit={submit} className="rounded-2xl border border-slate-200 bg-white p-6"><h2 className="text-lg font-extrabold">Permitted details</h2><p className="mt-2 text-sm leading-6 text-slate-600">Payment details are not stored in this profile and are requested only when you create a withdrawal request.</p><div className="mt-5 grid gap-4"><label className="grid gap-1.5 text-sm font-bold text-slate-700">Full name<input required value={name} onChange={event => setName(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Pakistani mobile number <span className="font-normal text-slate-500">Optional; e.g. 03XXXXXXXXX</span><input value={phone} onChange={event => setPhone(event.target.value)} className="h-11 rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-[#20bdb2]" /></label><label className="grid gap-1.5 text-sm font-bold text-slate-700">Email <input disabled value={profile.data?.user.email ?? "Managed by sign-in provider"} className="h-11 rounded-xl border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500" /></label></div><Button disabled={update.isPending} className="mt-6 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">{update.isPending ? <Loader2 className="animate-spin" size={17} /> : "Save permitted updates"}</Button></form></div>
     <PasswordSection hasPassword={profile.data?.hasPassword ?? false} onChanged={() => profile.refetch()} />
+    <InviteSection referralCode={profile.data?.referralCode ?? null} invitedCount={profile.data?.invitedCount ?? 0} />
     <AccountActionsSection />
   </div>;
+}
+
+function InviteSection({ referralCode, invitedCount }: { referralCode: string | null; invitedCount: number }) {
+  const copyInvite = async () => {
+    if (!referralCode) return;
+    const link = `${window.location.origin}/member-access?ref=${referralCode}`;
+    try {
+      await navigator.clipboard.writeText(`Join FMB Earning Hub with my invite code ${referralCode}: ${link}`);
+      toast.success("Invite link copied.");
+    } catch {
+      toast.error("Could not copy the invite link.");
+    }
+  };
+  return <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-6">
+    <h2 className="text-lg font-extrabold">Invite friends</h2>
+    {referralCode ? <>
+      <p className="mt-2 text-sm leading-6 text-slate-600">Share your invite code. When a friend signs up with it and their account is approved, you both earn a reward set by the administrator.</p>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <span className="rounded-xl bg-[#10233f] px-5 py-3 font-mono text-xl font-extrabold tracking-[.2em] text-[#6ee7dc]">{referralCode}</span>
+        <Button variant="outline" onClick={copyInvite} className="rounded-xl border-slate-300 font-bold">Copy invite link</Button>
+      </div>
+      <p className="mt-3 text-sm text-slate-600">Friends joined with your code: <span className="font-extrabold text-[#10233f]">{invitedCount}</span></p>
+    </> : <p className="mt-2 text-sm leading-6 text-slate-600">Buy any combo to unlock your personal invite code, then earn rewards for every friend who joins with it.</p>}
+  </section>;
 }
 
 function AccountActionsSection() {

@@ -2,7 +2,7 @@ import { startLogin } from "@/const";
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
 import { KeyRound, Loader2, LogIn, ShieldCheck, UserPlus, ArrowLeft } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
 
@@ -24,7 +24,19 @@ export default function MemberAccess() {
   const [signupEmail, setSignupEmail] = useState("");
   const [signupPhone, setSignupPhone] = useState("");
   const [signupPassword, setSignupPassword] = useState("");
+  const [referralCode, setReferralCode] = useState("");
   const [signupDone, setSignupDone] = useState(false);
+
+  // Prefill a friend's referral code from an invite link (?ref=CODE).
+  useEffect(() => {
+    try {
+      const ref = new URLSearchParams(window.location.search).get("ref")?.trim().toUpperCase() ?? "";
+      if (ref) {
+        setReferralCode(ref);
+        sessionStorage.setItem("fmb-pending-ref", ref);
+      }
+    } catch {}
+  }, []);
   // Forgot state
   const [forgotEmail, setForgotEmail] = useState("");
   const [forgotDone, setForgotDone] = useState(false);
@@ -48,7 +60,8 @@ export default function MemberAccess() {
   const submitSignup = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      await signup.mutateAsync({ name, email: signupEmail, password: signupPassword, phone: signupPhone });
+      await signup.mutateAsync({ name, email: signupEmail, password: signupPassword, phone: signupPhone, referralCode: referralCode.trim() || undefined });
+      try { sessionStorage.removeItem("fmb-pending-ref"); } catch {}
       setSignupPassword("");
       setSignupDone(true);
     } catch (error) {
@@ -157,6 +170,10 @@ export default function MemberAccess() {
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Password
               <input required type="password" autoComplete="new-password" minLength={8} value={signupPassword} onChange={e => setSignupPassword(e.target.value)} className={inputClass} placeholder="At least 8 characters" />
+            </label>
+            <label className="grid gap-1.5 text-sm font-bold text-slate-700">
+              Referral code <span className="font-normal text-slate-400">(optional)</span>
+              <input type="text" autoComplete="off" value={referralCode} onChange={e => setReferralCode(e.target.value.toUpperCase())} className={`${inputClass} font-mono uppercase`} placeholder="Friend's invite code" />
             </label>
             <Button disabled={signup.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
               {signup.isPending ? <Loader2 className="animate-spin" size={17} /> : <><UserPlus className="mr-2" size={17} />Create account</>}

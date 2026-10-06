@@ -42,6 +42,7 @@ export const INITIAL_PLATFORM_SETTINGS: Record<string, string> = {
   referrals_enabled: "false",
   referral_reward_paisa: "0",
   referral_reward_max_paisa: "0",
+  referee_reward_paisa: "0",
   terms_content: "Membership fees do not constitute an investment. Eligible advertising rewards depend on active campaigns, completion validation, package rules, and published platform terms.",
   privacy_content: "We collect account, verification, transaction, and device-security data only as needed to operate the platform, prevent fraud, and meet applicable obligations.",
   refund_content: "Replace this placeholder with the company’s actual refund policy before accepting payments.",

@@ -39,6 +39,7 @@ import {
   getUserWithdrawals,
   isAdminEmail,
   isGmailAddress,
+  applyReferralCode,
   listCampaigns,
   markNotificationsRead,
   requestPasswordReset,
@@ -213,7 +214,7 @@ export const appRouter = router({
       }
     }),
     /** Member self-registration with email + password. Starts in manual review. */
-    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160).refine(isGmailAddress, "Please sign up with a valid Gmail address (example@gmail.com)."), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX).") })).mutation(async ({ ctx, input }) => {
+    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160).refine(isGmailAddress, "Please sign up with a valid Gmail address (example@gmail.com)."), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX)."), referralCode: z.string().trim().max(16).optional() })).mutation(async ({ ctx, input }) => {
       const key = requestKey(ctx.req.headers);
       checkPasswordAuthRateLimit(key);
       try {
@@ -356,6 +357,10 @@ export const appRouter = router({
         ctx.res.clearCookie(COOKIE_NAME, { ...getSessionCookieOptions(ctx.req), maxAge: -1 });
         return result;
       } catch (error) { return toDomainError(error); }
+    }),
+    /** Link a friend's referral code (for signups that skipped the code field, e.g. Google). */
+    applyReferralCode: protectedProcedure.input(z.object({ referralCode: z.string().trim().min(1).max(16) })).mutation(async ({ ctx, input }) => {
+      try { return await applyReferralCode(ctx.user.id, input.referralCode); } catch (error) { return toDomainError(error); }
     }),
   }),
   ledger: router({
