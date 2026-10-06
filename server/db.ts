@@ -35,6 +35,7 @@ import type {
   Notification,
   Package,
   PasswordReset,
+  EmailVerification,
   PaymentProof,
   PlatformSetting,
   RewardVideo,
@@ -54,7 +55,7 @@ import {
   isValidPakistanMobile,
 } from "./platformRules";
 import { ENV } from "./_core/env";
-import { generateResetToken, hashPassword, hashResetToken, PASSWORD_RESET_TTL_MS, validatePassword, verifyPassword } from "./passwords";
+import { generateOtpCode, generateResetToken, hashOtpCode, hashPassword, hashResetToken, OTP_MAX_ATTEMPTS, OTP_TTL_MS, otpHashMatches, PASSWORD_RESET_TTL_MS, validatePassword, verifyPassword } from "./passwords";
 import { appBaseUrl, isMailerConfigured, sendMail } from "./mailer";
 import { storageDelete } from "./storage";
 import { storageGetSignedUrl } from "./storage";
@@ -829,7 +830,9 @@ export function isAdminEmail(email: string): boolean {
  * New accounts start in "review" status, same as Google signups — the
  * administrator manually approves them.
  */
-export async function signupMemberWithPassword(input: { name: string; email: string; password: string; phone: string; referralCode?: string }) {
+
+/** Shared signup validation (format checks + referral resolution). No writes. */
+async function validateSignupInput(input: { name: string; email: string; password: string; phone: string; referralCode?: string }) {
   const email = validateEmail(input.email);
   if (!isGmailAddress(email)) throw new Error("Please sign up with a valid Gmail address (example@gmail.com).");
   const name = input.name.trim();
@@ -850,19 +853,121 @@ export async function signupMemberWithPassword(input: { name: string; email: str
       referredByUserId = inviter.id;
     }
   }
+  return { name, email, phone, referredByUserId };
+}
+
+/** Create the member record after validation (used by direct signup and OTP verification). */
+async function createMemberAccount(input: { name: string; email: string; phone: string; passwordHash: string; referredByUserId: number | null }) {
+  const existing = await getUserByEmailWithHash(input.email);
+  if (existing) throw new Error("An account with this email already exists. Try signing in instead.");
   await upsertUser({
-    openId: `password:${email}`,
-    email,
-    name,
+    openId: `password:${input.email}`,
+    email: input.email,
+    name: input.name,
     loginMethod: "email_password",
-    passwordHash: await hashPassword(input.password),
-    phone,
-    referredByUserId,
+    passwordHash: input.passwordHash,
+    phone: input.phone,
+    referredByUserId: input.referredByUserId,
     role: "user",
     accountStatus: "review",
     lastSignedIn: new Date(),
   });
   return { status: "review" as const };
+}
+
+/**
+ * Registration email OTP, step 1: validate the signup, stash the pending
+ * details, and email a 6-digit code. The account is created only after the
+ * code is verified, so unverified signups never pile up in review.
+ */
+export async function startEmailVerification(input: { name: string; email: string; password: string; phone: string; referralCode?: string }) {
+  if (!isMailerConfigured()) {
+    throw new Error("Email verification is not available right now. Please contact support.");
+  }
+  const validated = await validateSignupInput(input);
+  const passwordHash = await hashPassword(input.password);
+  const code = generateOtpCode();
+  const db = requireDatabase(await getDb());
+  const verificationId = await db.runTransaction(async (tx) => {
+    const counters = await readCounters(tx, db);
+    const newId = allocId(counters, "emailVerifications");
+    const now = new Date();
+    writeCounters(tx, counters);
+    tx.set(
+      docRef(db, "emailVerifications", newId),
+      toStore({
+        id: newId,
+        email: validated.email,
+        codeHash: hashOtpCode(code),
+        name: validated.name,
+        phone: validated.phone,
+        passwordHash,
+        referredByUserId: validated.referredByUserId,
+        attempts: 0,
+        expiresAt: new Date(now.getTime() + OTP_TTL_MS),
+        consumedAt: null,
+        createdAt: now,
+      } satisfies EmailVerification),
+    );
+    return newId;
+  });
+  await sendMail({
+    to: validated.email,
+    subject: "Your FMB Earning Hub verification code",
+    text: `Your FMB Earning Hub verification code is: ${code}\n\nIt expires in 10 minutes. If you did not request this, you can ignore this email.`,
+    html: `<p>Your FMB Earning Hub verification code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:8px;">${code}</p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
+  });
+  return { verificationId };
+}
+
+/** Registration email OTP, step 2: verify the code and create the account. */
+export async function verifyEmailOtp(input: { verificationId: number; code: string }) {
+  const db = requireDatabase(await getDb());
+  const doc = (await getDoc(db, "emailVerifications", input.verificationId)) as EmailVerification | null;
+  if (!doc || doc.consumedAt || new Date(doc.expiresAt).getTime() <= Date.now()) {
+    throw new Error("This verification code is invalid or has expired. Please request a new one.");
+  }
+  if (doc.attempts >= OTP_MAX_ATTEMPTS) {
+    throw new Error("Too many wrong attempts. Please request a new code.");
+  }
+  if (!otpHashMatches(input.code, doc.codeHash)) {
+    await db.collection("emailVerifications").doc(String(doc.id)).update(toStore({ attempts: doc.attempts + 1 }));
+    throw new Error("The code you entered is incorrect. Please try again.");
+  }
+  await db.collection("emailVerifications").doc(String(doc.id)).update(toStore({ consumedAt: new Date() }));
+  return createMemberAccount({
+    name: doc.name,
+    email: doc.email,
+    phone: doc.phone,
+    passwordHash: doc.passwordHash,
+    referredByUserId: doc.referredByUserId,
+  });
+}
+
+/** Send a fresh code for a pending email verification (60s cooldown). */
+export async function resendEmailOtp(verificationId: number) {
+  if (!isMailerConfigured()) {
+    throw new Error("Email verification is not available right now. Please contact support.");
+  }
+  const db = requireDatabase(await getDb());
+  const doc = (await getDoc(db, "emailVerifications", verificationId)) as EmailVerification | null;
+  if (!doc || doc.consumedAt) throw new Error("This verification is no longer valid. Please start again.");
+  const sinceCreated = Date.now() - new Date(doc.createdAt).getTime();
+  if (sinceCreated < 60_000 && doc.attempts === 0) {
+    throw new Error("Please wait a minute before requesting a new code.");
+  }
+  const code = generateOtpCode();
+  const now = new Date();
+  await db.collection("emailVerifications").doc(String(doc.id)).update(
+    toStore({ codeHash: hashOtpCode(code), attempts: 0, expiresAt: new Date(now.getTime() + OTP_TTL_MS), createdAt: now }),
+  );
+  await sendMail({
+    to: doc.email,
+    subject: "Your FMB Earning Hub verification code",
+    text: `Your new FMB Earning Hub verification code is: ${code}\n\nIt expires in 10 minutes. If you did not request this, you can ignore this email.`,
+    html: `<p>Your new FMB Earning Hub verification code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:8px;">${code}</p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
+  });
+  return { success: true as const };
 }
 
 const INVALID_CREDENTIALS = "Invalid email or password.";
@@ -891,8 +996,8 @@ export async function requestPasswordReset(email: string) {
     throw new Error("Password reset by email is not available right now. Please contact support.");
   }
   const record = isAdminEmail(normalized) ? undefined : await getUserByEmailWithHash(normalized);
-  if (record) {
-    const { token, tokenHash } = generateResetToken();
+  if (record && record.passwordHash) {
+    const code = generateOtpCode();
     const db = requireDatabase(await getDb());
     await db.runTransaction(async (tx) => {
       const counters = await readCounters(tx, db);
@@ -904,49 +1009,66 @@ export async function requestPasswordReset(email: string) {
         toStore({
           id,
           userId: record.id,
-          tokenHash,
-          expiresAt: new Date(now.getTime() + PASSWORD_RESET_TTL_MS),
+          codeHash: hashOtpCode(code),
+          attempts: 0,
+          expiresAt: new Date(now.getTime() + OTP_TTL_MS),
           usedAt: null,
           createdAt: now,
-        }),
+        } satisfies PasswordReset),
       );
     });
-    const resetLink = `${appBaseUrl()}/reset-password?token=${token}`;
     await sendMail({
       to: normalized,
-      subject: "Reset your FMB Earning Hub password",
-      text: `Someone requested a password reset for your FMB Earning Hub account.\n\nReset your password here (valid for 1 hour):\n${resetLink}\n\nIf you did not request this, you can ignore this email.`,
-      html: `<p>Someone requested a password reset for your FMB Earning Hub account.</p><p><a href="${resetLink}">Reset your password</a> (valid for 1 hour).</p><p>If you did not request this, you can ignore this email.</p>`,
+      subject: "Your FMB Earning Hub password reset code",
+      text: `Your FMB Earning Hub password reset code is: ${code}\n\nIt expires in 10 minutes. If you did not request this, you can ignore this email.`,
+      html: `<p>Your FMB Earning Hub password reset code is:</p><p style="font-size:28px;font-weight:bold;letter-spacing:8px;">${code}</p><p>It expires in 10 minutes. If you did not request this, you can ignore this email.</p>`,
     });
   }
   return { success: true as const };
 }
 
-/** Consume a reset token and set a new password. Single-use, 1-hour expiry. */
-export async function resetPasswordWithToken(input: { token: string; newPassword: string }) {
+/**
+ * Forgot password: verify the 6-digit OTP and set the new password in one
+ * step. Single-use, 10-minute expiry, 5 attempts. The code is matched to the
+ * email address it was sent to.
+ */
+export async function resetPasswordWithOtp(input: { email: string; code: string; newPassword: string }) {
   const passwordError = validatePassword(input.newPassword);
   if (passwordError) throw new Error(passwordError);
-  const tokenHash = hashResetToken(input.token);
+  const normalized = validateEmail(input.email);
   const db = requireDatabase(await getDb());
-  const snap = await db.collection("passwordResets").where("tokenHash", "==", tokenHash).limit(1).get();
-  const reset = firstRow(snap.docs) as PasswordReset | null;
-  const expiresAt = reset ? new Date(reset.expiresAt).getTime() : 0;
-  if (!reset || reset.usedAt || expiresAt <= Date.now()) {
-    throw new Error("This reset link is invalid or has expired. Please request a new one.");
+  const snap = await db.collection("passwordResets").where("codeHash", "==", hashOtpCode(input.code)).limit(10).get();
+  const now = Date.now();
+  const candidates = snap.docs
+    .map((d) => d.data() as PasswordReset)
+    .filter((r) => !r.usedAt && new Date(r.expiresAt).getTime() > now);
+  let matched: PasswordReset | null = null;
+  for (const r of candidates) {
+    const user = (await getDoc(db, "users", r.userId)) as User | null;
+    if (user && normalizeEmail(user.email ?? "") === normalized && user.passwordHash) {
+      matched = r;
+      break;
+    }
   }
+  if (!matched) throw new Error("The code you entered is incorrect or has expired. Please request a new one.");
+  if (matched.attempts >= OTP_MAX_ATTEMPTS) throw new Error("Too many wrong attempts. Please request a new code.");
   const passwordHash = await hashPassword(input.newPassword);
-  const now = new Date();
   await db.runTransaction(async (tx) => {
-    const userRef = docRef(db, "users", reset.userId);
+    const userRef = docRef(db, "users", matched!.userId);
     const userSnap = await tx.get(userRef);
-    if (!userSnap.exists) throw new Error("The account for this reset link no longer exists.");
+    const resetSnap = await tx.get(docRef(db, "passwordResets", matched!.id));
+    const resetRow = resetSnap.data() as PasswordReset | undefined;
+    if (!userSnap.exists || !resetRow || resetRow.usedAt || new Date(resetRow.expiresAt).getTime() <= Date.now()) {
+      throw new Error("The code you entered is incorrect or has expired. Please request a new one.");
+    }
     const counters = await readCounters(tx, db);
     writeCounters(tx, counters);
-    tx.update(userRef, toStore({ passwordHash, updatedAt: now }));
-    tx.update(docRef(db, "passwordResets", reset.id), toStore({ usedAt: now }));
+    tx.update(userRef, toStore({ passwordHash, updatedAt: new Date() }));
+    tx.update(docRef(db, "passwordResets", matched!.id), toStore({ usedAt: new Date() }));
   });
   return { success: true as const };
 }
+
 
 /**
  * Change the password of an authenticated member. Members who signed up with

@@ -3,9 +3,11 @@ import type { TrpcContext } from "./_core/context";
 
 const mocks = vi.hoisted(() => ({
   verifyMemberPasswordLogin: vi.fn(),
-  signupMemberWithPassword: vi.fn(),
+  startEmailVerification: vi.fn(),
+  verifyEmailOtp: vi.fn(),
+  resendEmailOtp: vi.fn(),
   requestPasswordReset: vi.fn(),
-  resetPasswordWithToken: vi.fn(),
+  resetPasswordWithOtp: vi.fn(),
   changeMemberPassword: vi.fn(),
   deleteMemberAccount: vi.fn(),
   applyReferralCode: vi.fn(),
@@ -18,9 +20,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./db", async () => ({
   ...(await vi.importActual<typeof import("./db")>("./db")),
   verifyMemberPasswordLogin: mocks.verifyMemberPasswordLogin,
-  signupMemberWithPassword: mocks.signupMemberWithPassword,
+  startEmailVerification: mocks.startEmailVerification,
+  verifyEmailOtp: mocks.verifyEmailOtp,
+  resendEmailOtp: mocks.resendEmailOtp,
   requestPasswordReset: mocks.requestPasswordReset,
-  resetPasswordWithToken: mocks.resetPasswordWithToken,
+  resetPasswordWithOtp: mocks.resetPasswordWithOtp,
   changeMemberPassword: mocks.changeMemberPassword,
   deleteMemberAccount: mocks.deleteMemberAccount,
   applyReferralCode: mocks.applyReferralCode,
@@ -117,51 +121,76 @@ describe("auth.passwordLogin", () => {
   });
 });
 
-describe("auth.passwordSignup", () => {
-  it("creates the account in review status", async () => {
-    mocks.signupMemberWithPassword.mockResolvedValue({ status: "review" });
+describe("auth.startEmailVerification / auth.verifyEmailOtp", () => {
+  it("starts verification and returns a verification id", async () => {
+    mocks.startEmailVerification.mockResolvedValue({ verificationId: 42 });
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567" }),
-    ).resolves.toEqual({ status: "review" });
+      caller.auth.startEmailVerification({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567" }),
+    ).resolves.toEqual({ verificationId: 42 });
   });
 
   it("rejects short passwords at the boundary", async () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "short", phone: "03001234567" }),
+      caller.auth.startEmailVerification({ name: "New Member", email: "new@gmail.com", password: "short", phone: "03001234567" }),
     ).rejects.toThrow();
-    expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+    expect(mocks.startEmailVerification).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid phone number at the boundary", async () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "123" }),
+      caller.auth.startEmailVerification({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "123" }),
     ).rejects.toThrow();
-    expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+    expect(mocks.startEmailVerification).not.toHaveBeenCalled();
   });
 
   it("rejects non-Gmail addresses at the boundary", async () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@yahoo.com", password: "new-pass-123", phone: "03001234567" }),
+      caller.auth.startEmailVerification({ name: "New Member", email: "new@yahoo.com", password: "new-pass-123", phone: "03001234567" }),
     ).rejects.toThrow(/Gmail/);
-    expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+    expect(mocks.startEmailVerification).not.toHaveBeenCalled();
   });
 
-  it("passes an optional referral code through to signup", async () => {
-    mocks.signupMemberWithPassword.mockResolvedValue({ status: "review" });
+  it("passes an optional referral code through", async () => {
+    mocks.startEmailVerification.mockResolvedValue({ verificationId: 42 });
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
-    await caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567", referralCode: "ABC123" });
-    expect(mocks.signupMemberWithPassword).toHaveBeenCalledWith(
+    await caller.auth.startEmailVerification({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567", referralCode: "ABC123" });
+    expect(mocks.startEmailVerification).toHaveBeenCalledWith(
       expect.objectContaining({ referralCode: "ABC123" }),
     );
+  });
+
+  it("verifies the OTP and creates the account", async () => {
+    mocks.verifyEmailOtp.mockResolvedValue({ status: "review" });
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.auth.verifyEmailOtp({ verificationId: 42, code: "123456" }),
+    ).resolves.toEqual({ status: "review" });
+  });
+
+  it("rejects malformed OTP codes at the boundary", async () => {
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.auth.verifyEmailOtp({ verificationId: 42, code: "12" }),
+    ).rejects.toThrow();
+    expect(mocks.verifyEmailOtp).not.toHaveBeenCalled();
+  });
+
+  it("resends the code", async () => {
+    mocks.resendEmailOtp.mockResolvedValue({ success: true });
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.auth.resendEmailOtp({ verificationId: 42 })).resolves.toEqual({ success: true });
   });
 });
 
@@ -182,7 +211,7 @@ describe("profile.applyReferralCode", () => {
   });
 });
 
-describe("auth.requestPasswordReset / auth.resetPassword", () => {
+describe("auth.requestPasswordReset / auth.resetPasswordWithOtp", () => {
   it("returns success for reset requests", async () => {
     mocks.requestPasswordReset.mockResolvedValue({ success: true });
     const { ctx } = makeCtx();
@@ -190,14 +219,23 @@ describe("auth.requestPasswordReset / auth.resetPassword", () => {
     await expect(caller.auth.requestPasswordReset({ email: "member@example.com" })).resolves.toEqual({ success: true });
   });
 
-  it("consumes a reset token", async () => {
-    mocks.resetPasswordWithToken.mockResolvedValue({ success: true });
+  it("resets the password with a valid OTP", async () => {
+    mocks.resetPasswordWithOtp.mockResolvedValue({ success: true });
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.resetPassword({ token: "a".repeat(64), newPassword: "brand-new-123" }),
+      caller.auth.resetPasswordWithOtp({ email: "member@gmail.com", code: "654321", newPassword: "brand-new-123" }),
     ).resolves.toEqual({ success: true });
-    expect(mocks.resetPasswordWithToken).toHaveBeenCalledWith({ token: "a".repeat(64), newPassword: "brand-new-123" });
+    expect(mocks.resetPasswordWithOtp).toHaveBeenCalledWith({ email: "member@gmail.com", code: "654321", newPassword: "brand-new-123" });
+  });
+
+  it("rejects malformed OTP codes at the boundary", async () => {
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.auth.resetPasswordWithOtp({ email: "member@gmail.com", code: "12", newPassword: "brand-new-123" }),
+    ).rejects.toThrow();
+    expect(mocks.resetPasswordWithOtp).not.toHaveBeenCalled();
   });
 });
 

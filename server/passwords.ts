@@ -1,4 +1,4 @@
-import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, scrypt, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
 const scryptAsync = promisify(scrypt);
@@ -47,3 +47,22 @@ export function hashResetToken(token: string): string {
 }
 
 export const PASSWORD_RESET_TTL_MS = 60 * 60 * 1_000; // 1 hour
+
+/** 6-digit email OTP: only the SHA-256 hash is ever stored. */
+export const OTP_TTL_MS = 10 * 60 * 1_000; // 10 minutes
+export const OTP_MAX_ATTEMPTS = 5;
+
+export function generateOtpCode(): string {
+  return String(randomInt(100_000, 1_000_000));
+}
+
+export function hashOtpCode(code: string): string {
+  return createHash("sha256").update(code.trim()).digest("hex");
+}
+
+/** Timing-safe comparison for OTP hashes. */
+export function otpHashMatches(candidate: string, expectedHash: string): boolean {
+  const a = Buffer.from(hashOtpCode(candidate), "hex");
+  const b = Buffer.from(expectedHash, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}

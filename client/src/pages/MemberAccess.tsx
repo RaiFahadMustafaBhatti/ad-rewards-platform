@@ -1,7 +1,7 @@
 import { startLogin } from "@/const";
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
-import { KeyRound, Loader2, LogIn, ShieldCheck, UserPlus, ArrowLeft } from "lucide-react";
+import { KeyRound, Loader2, LogIn, ShieldCheck, UserPlus, ArrowLeft, BadgeCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
@@ -42,8 +42,17 @@ export default function MemberAccess() {
   const [forgotDone, setForgotDone] = useState(false);
 
   const login = trpc.auth.passwordLogin.useMutation();
-  const signup = trpc.auth.passwordSignup.useMutation();
+  const startVerification = trpc.auth.startEmailVerification.useMutation();
+  const verifyOtp = trpc.auth.verifyEmailOtp.useMutation();
+  const resendOtp = trpc.auth.resendEmailOtp.useMutation();
   const requestReset = trpc.auth.requestPasswordReset.useMutation();
+  const resetWithOtp = trpc.auth.resetPasswordWithOtp.useMutation();
+  const [otpStep, setOtpStep] = useState<"details" | "code">("details");
+  const [verificationId, setVerificationId] = useState<number | null>(null);
+  const [otpCode, setOtpCode] = useState("");
+  const [forgotStep, setForgotStep] = useState<"email" | "code">("email");
+  const [forgotCode, setForgotCode] = useState("");
+  const [forgotNewPassword, setForgotNewPassword] = useState("");
 
   const submitLogin = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -60,12 +69,36 @@ export default function MemberAccess() {
   const submitSignup = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      await signup.mutateAsync({ name, email: signupEmail, password: signupPassword, phone: signupPhone, referralCode: referralCode.trim() || undefined });
-      try { sessionStorage.removeItem("fmb-pending-ref"); } catch {}
-      setSignupPassword("");
-      setSignupDone(true);
+      const result = await startVerification.mutateAsync({ name, email: signupEmail, password: signupPassword, phone: signupPhone, referralCode: referralCode.trim() || undefined });
+      setVerificationId(result.verificationId);
+      setOtpStep("code");
+      toast.success("A 6-digit verification code was sent to your email.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Sign-up could not be completed.");
+    }
+  };
+
+  const submitOtp = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (verificationId == null) return;
+    try {
+      await verifyOtp.mutateAsync({ verificationId, code: otpCode });
+      try { sessionStorage.removeItem("fmb-pending-ref"); } catch {}
+      setSignupPassword("");
+      setOtpCode("");
+      setSignupDone(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Verification failed.");
+    }
+  };
+
+  const resendCode = async () => {
+    if (verificationId == null) return;
+    try {
+      await resendOtp.mutateAsync({ verificationId });
+      toast.success("A new code was sent to your email.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not resend the code.");
     }
   };
 
@@ -73,9 +106,22 @@ export default function MemberAccess() {
     event.preventDefault();
     try {
       await requestReset.mutateAsync({ email: forgotEmail });
-      setForgotDone(true);
+      setForgotStep("code");
+      toast.success("A 6-digit reset code was sent to your email.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not start the password reset.");
+    }
+  };
+
+  const submitForgotCode = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      await resetWithOtp.mutateAsync({ email: forgotEmail, code: forgotCode, newPassword: forgotNewPassword });
+      setForgotCode("");
+      setForgotNewPassword("");
+      setForgotDone(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Password reset failed.");
     }
   };
 
@@ -83,6 +129,8 @@ export default function MemberAccess() {
     setMode(next);
     setSignupDone(false);
     setForgotDone(false);
+    setOtpStep("details");
+    setForgotStep("email");
   };
 
   return (
@@ -151,7 +199,7 @@ export default function MemberAccess() {
           </>
         )}
 
-        {mode === "signup" && !signupDone && (
+        {mode === "signup" && !signupDone && otpStep === "details" && (
           <>
           <form onSubmit={submitSignup} className="mt-7 grid gap-4">
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
@@ -175,8 +223,8 @@ export default function MemberAccess() {
               Referral code <span className="font-normal text-slate-400">(optional)</span>
               <input type="text" autoComplete="off" value={referralCode} onChange={e => setReferralCode(e.target.value.toUpperCase())} className={`${inputClass} font-mono uppercase`} placeholder="Friend's invite code" />
             </label>
-            <Button disabled={signup.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
-              {signup.isPending ? <Loader2 className="animate-spin" size={17} /> : <><UserPlus className="mr-2" size={17} />Create account</>}
+            <Button disabled={startVerification.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
+              {startVerification.isPending ? <Loader2 className="animate-spin" size={17} /> : <><UserPlus className="mr-2" size={17} />Send verification code</>}
             </Button>
           </form>
           <div className="my-5 flex items-center gap-3 text-xs font-bold uppercase tracking-wider text-slate-400">
@@ -198,6 +246,26 @@ export default function MemberAccess() {
           </>
         )}
 
+        {mode === "signup" && !signupDone && otpStep === "code" && (
+          <form onSubmit={submitOtp} className="mt-7 grid gap-4">
+            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm leading-6 text-sky-900">
+              <p className="font-extrabold">Check your email.</p>
+              <p className="mt-1">We sent a 6-digit verification code to <span className="font-bold">{signupEmail}</span>. It expires in 10 minutes.</p>
+            </div>
+            <label className="grid gap-1.5 text-sm font-bold text-slate-700">
+              Verification code
+              <input required type="text" inputMode="numeric" autoComplete="one-time-code" value={otpCode} onChange={e => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))} className={`${inputClass} text-center font-mono text-2xl tracking-[.4em]`} placeholder="••••••" />
+            </label>
+            <Button disabled={verifyOtp.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
+              {verifyOtp.isPending ? <Loader2 className="animate-spin" size={17} /> : <><BadgeCheck className="mr-2" size={17} />Verify & create account</>}
+            </Button>
+            <div className="flex items-center justify-between text-sm">
+              <button type="button" onClick={() => setOtpStep("details")} className="font-bold text-slate-600 hover:underline">Back</button>
+              <button type="button" disabled={resendOtp.isPending} onClick={resendCode} className="font-bold text-[#13897f] hover:underline disabled:opacity-50">Resend code</button>
+            </div>
+          </form>
+        )}
+
         {mode === "signup" && signupDone && (
           <div className="mt-7 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-sm leading-6 text-emerald-900">
             <p className="font-extrabold">Account created.</p>
@@ -208,14 +276,14 @@ export default function MemberAccess() {
           </div>
         )}
 
-        {mode === "forgot" && !forgotDone && (
+        {mode === "forgot" && !forgotDone && forgotStep === "email" && (
           <form onSubmit={submitForgot} className="mt-7 grid gap-4">
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Account email
-              <input required type="email" autoComplete="email" value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} className={inputClass} placeholder="you@example.com" />
+              <input required type="email" autoComplete="email" value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} className={inputClass} placeholder="you@gmail.com" />
             </label>
             <Button disabled={requestReset.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
-              {requestReset.isPending ? <Loader2 className="animate-spin" size={17} /> : <><KeyRound className="mr-2" size={17} />Send reset link</>}
+              {requestReset.isPending ? <Loader2 className="animate-spin" size={17} /> : <><KeyRound className="mr-2" size={17} />Send verification code</>}
             </Button>
             <button type="button" onClick={() => switchMode("signin")} className="flex items-center justify-center gap-1 text-sm font-bold text-slate-600 hover:underline">
               <ArrowLeft size={15} /> Back to sign in
@@ -223,10 +291,33 @@ export default function MemberAccess() {
           </form>
         )}
 
+        {mode === "forgot" && !forgotDone && forgotStep === "code" && (
+          <form onSubmit={submitForgotCode} className="mt-7 grid gap-4">
+            <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm leading-6 text-sky-900">
+              <p className="font-extrabold">Check your email.</p>
+              <p className="mt-1">We sent a 6-digit reset code to <span className="font-bold">{forgotEmail}</span>. It expires in 10 minutes.</p>
+            </div>
+            <label className="grid gap-1.5 text-sm font-bold text-slate-700">
+              Reset code
+              <input required type="text" inputMode="numeric" autoComplete="one-time-code" value={forgotCode} onChange={e => setForgotCode(e.target.value.replace(/\D/g, "").slice(0, 6))} className={`${inputClass} text-center font-mono text-2xl tracking-[.4em]`} placeholder="••••••" />
+            </label>
+            <label className="grid gap-1.5 text-sm font-bold text-slate-700">
+              New password
+              <input required type="password" autoComplete="new-password" minLength={8} value={forgotNewPassword} onChange={e => setForgotNewPassword(e.target.value)} className={inputClass} placeholder="At least 8 characters" />
+            </label>
+            <Button disabled={resetWithOtp.isPending} className="mt-1 h-11 rounded-xl bg-[#10233f] font-bold hover:bg-[#19375f]">
+              {resetWithOtp.isPending ? <Loader2 className="animate-spin" size={17} /> : <><KeyRound className="mr-2" size={17} />Reset password</>}
+            </Button>
+            <button type="button" onClick={() => setForgotStep("email")} className="flex items-center justify-center gap-1 text-sm font-bold text-slate-600 hover:underline">
+              <ArrowLeft size={15} /> Back
+            </button>
+          </form>
+        )}
+
         {mode === "forgot" && forgotDone && (
           <div className="mt-7 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-sm leading-6 text-emerald-900">
-            <p className="font-extrabold">Check your email.</p>
-            <p className="mt-1">If an account exists for that email, a password reset link is on its way. The link expires in one hour.</p>
+            <p className="font-extrabold">Password updated.</p>
+            <p className="mt-1">Your password has been changed. You can now sign in with your new password.</p>
             <button onClick={() => switchMode("signin")} className="mt-3 flex items-center gap-1 font-bold text-[#13897f] hover:underline">
               <ArrowLeft size={15} /> Back to sign in
             </button>

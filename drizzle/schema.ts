@@ -368,8 +368,10 @@ export type InsertPlatformSetting = Omit<PlatformSetting, "id" | "updatedAt"> &
 export interface PasswordReset {
   id: number;
   userId: number;
-  /** SHA-256 hex of the reset token. The raw token only ever travels by email. */
-  tokenHash: string;
+  /** SHA-256 hex of the 6-digit OTP. The raw code only ever travels by email. */
+  codeHash: string;
+  /** Failed verification attempts; locked after OTP_MAX_ATTEMPTS. */
+  attempts: number;
   expiresAt: Date;
   usedAt: Date | null;
   createdAt: Date;
@@ -377,3 +379,20 @@ export interface PasswordReset {
 
 export type InsertPasswordReset = Omit<PasswordReset, "id" | "createdAt"> &
   Partial<Pick<PasswordReset, "id" | "createdAt">>;
+
+/** Pending email verification for registration: the account is created only after the OTP is verified. */
+export interface EmailVerification {
+  id: number;
+  email: string;
+  /** SHA-256 hex of the 6-digit OTP. The raw code only ever travels by email. */
+  codeHash: string;
+  name: string;
+  phone: string;
+  /** Scrypt hash of the chosen password, stored so the plain password never persists. */
+  passwordHash: string;
+  referredByUserId: number | null;
+  attempts: number;
+  expiresAt: Date;
+  consumedAt: Date | null;
+  createdAt: Date;
+}

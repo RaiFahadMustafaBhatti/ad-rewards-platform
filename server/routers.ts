@@ -43,9 +43,11 @@ import {
   listCampaigns,
   markNotificationsRead,
   requestPasswordReset,
-  resetPasswordWithToken,
+  resetPasswordWithOtp,
+  resendEmailOtp,
+  startEmailVerification,
+  verifyEmailOtp,
   reviewPaymentProof,
-  signupMemberWithPassword,
   startAdSession,
   startVideoWatchSession,
   submitPaymentProof,
@@ -213,12 +215,33 @@ export const appRouter = router({
         throw error;
       }
     }),
-    /** Member self-registration with email + password. Starts in manual review. */
-    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160).refine(isGmailAddress, "Please sign up with a valid Gmail address (example@gmail.com)."), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX)."), referralCode: z.string().trim().max(16).optional() })).mutation(async ({ ctx, input }) => {
+    /** Registration step 1: validate and email a 6-digit verification code. */
+    startEmailVerification: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160).refine(isGmailAddress, "Please sign up with a valid Gmail address (example@gmail.com)."), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX)."), referralCode: z.string().trim().max(16).optional() })).mutation(async ({ ctx, input }) => {
       const key = requestKey(ctx.req.headers);
       checkPasswordAuthRateLimit(key);
       try {
-        return await signupMemberWithPassword(input);
+        return await startEmailVerification(input);
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
+    }),
+    /** Registration step 2: verify the code and create the account (manual review). */
+    verifyEmailOtp: publicProcedure.input(z.object({ verificationId: z.number().int().positive(), code: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code.") })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        return await verifyEmailOtp(input);
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
+    }),
+    resendEmailOtp: publicProcedure.input(z.object({ verificationId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        return await resendEmailOtp(input.verificationId);
       } catch (error) {
         recordPasswordAuthFailure(key);
         throw error;
@@ -234,8 +257,16 @@ export const appRouter = router({
         throw error;
       }
     }),
-    resetPassword: publicProcedure.input(z.object({ token: z.string().trim().min(16).max(128), newPassword: z.string().min(8).max(256) })).mutation(async ({ input }) => {
-      return resetPasswordWithToken({ token: input.token, newPassword: input.newPassword });
+    /** Forgot password: verify the emailed 6-digit code and set the new password. */
+    resetPasswordWithOtp: publicProcedure.input(z.object({ email: z.string().trim().email().max(160), code: z.string().trim().regex(/^\d{6}$/, "Enter the 6-digit code."), newPassword: z.string().min(8).max(256) })).mutation(async ({ ctx, input }) => {
+      const key = requestKey(ctx.req.headers);
+      checkPasswordAuthRateLimit(key);
+      try {
+        return await resetPasswordWithOtp(input);
+      } catch (error) {
+        recordPasswordAuthFailure(key);
+        throw error;
+      }
     }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
