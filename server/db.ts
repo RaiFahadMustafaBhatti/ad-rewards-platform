@@ -1039,8 +1039,7 @@ export async function resetPasswordWithOtp(input: { email: string; code: string;
   const db = requireDatabase(await getDb());
   const snap = await db.collection("passwordResets").where("codeHash", "==", hashOtpCode(input.code)).limit(10).get();
   const now = Date.now();
-  const candidates = snap.docs
-    .map((d) => d.data() as PasswordReset)
+  const candidates = (rowsFromSnaps(snap.docs) as PasswordReset[])
     .filter((r) => !r.usedAt && new Date(r.expiresAt).getTime() > now);
   let matched: PasswordReset | null = null;
   for (const r of candidates) {
@@ -1057,7 +1056,7 @@ export async function resetPasswordWithOtp(input: { email: string; code: string;
     const userRef = docRef(db, "users", matched!.userId);
     const userSnap = await tx.get(userRef);
     const resetSnap = await tx.get(docRef(db, "passwordResets", matched!.id));
-    const resetRow = resetSnap.data() as PasswordReset | undefined;
+    const resetRow = rowFromSnap(resetSnap) as PasswordReset | null;
     if (!userSnap.exists || !resetRow || resetRow.usedAt || new Date(resetRow.expiresAt).getTime() <= Date.now()) {
       throw new Error("The code you entered is incorrect or has expired. Please request a new one.");
     }
