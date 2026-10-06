@@ -119,7 +119,7 @@ describe("auth.passwordSignup", () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "new-pass-123", phone: "03001234567" }),
+      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "03001234567" }),
     ).resolves.toEqual({ status: "review" });
   });
 
@@ -127,7 +127,7 @@ describe("auth.passwordSignup", () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "short", phone: "03001234567" }),
+      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "short", phone: "03001234567" }),
     ).rejects.toThrow();
     expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
   });
@@ -136,8 +136,17 @@ describe("auth.passwordSignup", () => {
     const { ctx } = makeCtx();
     const caller = appRouter.createCaller(ctx);
     await expect(
-      caller.auth.passwordSignup({ name: "New Member", email: "new@example.com", password: "new-pass-123", phone: "123" }),
+      caller.auth.passwordSignup({ name: "New Member", email: "new@gmail.com", password: "new-pass-123", phone: "123" }),
     ).rejects.toThrow();
+    expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-Gmail addresses at the boundary", async () => {
+    const { ctx } = makeCtx();
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.auth.passwordSignup({ name: "New Member", email: "new@yahoo.com", password: "new-pass-123", phone: "03001234567" }),
+    ).rejects.toThrow(/Gmail/);
     expect(mocks.signupMemberWithPassword).not.toHaveBeenCalled();
   });
 });

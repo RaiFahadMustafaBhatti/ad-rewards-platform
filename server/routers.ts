@@ -37,6 +37,7 @@ import {
   getUserNotifications,
   getUserWithdrawals,
   isAdminEmail,
+  isGmailAddress,
   listCampaigns,
   markNotificationsRead,
   requestPasswordReset,
@@ -211,7 +212,7 @@ export const appRouter = router({
       }
     }),
     /** Member self-registration with email + password. Starts in manual review. */
-    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX).") })).mutation(async ({ ctx, input }) => {
+    passwordSignup: publicProcedure.input(z.object({ name: z.string().trim().min(2).max(160), email: z.string().trim().email().max(160).refine(isGmailAddress, "Please sign up with a valid Gmail address (example@gmail.com)."), password: z.string().min(8).max(256), phone: z.string().trim().min(1).max(20).refine(isValidPakistanMobile, "Enter a valid Pakistani mobile number (e.g. 03XXXXXXXXX).") })).mutation(async ({ ctx, input }) => {
       const key = requestKey(ctx.req.headers);
       checkPasswordAuthRateLimit(key);
       try {

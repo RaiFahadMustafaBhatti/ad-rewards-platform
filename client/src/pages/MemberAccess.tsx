@@ -147,7 +147,8 @@ export default function MemberAccess() {
             </label>
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Email
-              <input required type="email" autoComplete="email" value={signupEmail} onChange={e => setSignupEmail(e.target.value)} className={inputClass} placeholder="you@example.com" />
+              <input required type="email" autoComplete="email" value={signupEmail} onChange={e => setSignupEmail(e.target.value)} className={inputClass} placeholder="you@gmail.com" />
+              <span className="text-xs font-normal text-slate-500">Gmail address only</span>
             </label>
             <label className="grid gap-1.5 text-sm font-bold text-slate-700">
               Mobile number

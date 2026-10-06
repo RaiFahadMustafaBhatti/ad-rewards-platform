@@ -594,6 +594,11 @@ function validateEmail(email: string): string {
   return normalized;
 }
 
+/** Member signups are restricted to Gmail addresses. */
+export function isGmailAddress(email: string): boolean {
+  return normalizeEmail(email).endsWith("@gmail.com");
+}
+
 /** True when the email matches the configured administrator account. */
 export function isAdminEmail(email: string): boolean {
   const configured = process.env.ADMIN_EMAIL?.trim().toLowerCase();
@@ -607,6 +612,7 @@ export function isAdminEmail(email: string): boolean {
  */
 export async function signupMemberWithPassword(input: { name: string; email: string; password: string; phone: string }) {
   const email = validateEmail(input.email);
+  if (!isGmailAddress(email)) throw new Error("Please sign up with a valid Gmail address (example@gmail.com).");
   const name = input.name.trim();
   if (name.length < 2) throw new Error("Enter your full name.");
   const passwordError = validatePassword(input.password);
