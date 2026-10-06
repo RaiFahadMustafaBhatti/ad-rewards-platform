@@ -752,11 +752,6 @@ export async function deleteMemberAccount(userId: number) {
   if (user.role === "admin") throw new Error("The administrator account cannot be deleted.");
 
   const walletId = await uniqueOwner(db, ukey("wallet", String(userId)));
-  const wallet = (walletId != null ? await getDoc(db, "wallets", walletId) : null) as Wallet | null;
-  const balancePaisa = wallet ? Number(wallet.availableBalancePaisa ?? 0) : 0;
-  if (balancePaisa > 0) {
-    throw new Error("Please withdraw your remaining balance before deleting your account.");
-  }
   const openWithdrawal = await db
     .collection("withdrawals")
     .where("userId", "==", userId)
